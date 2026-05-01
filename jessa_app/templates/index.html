@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JESSA</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <div class="brand">JESSA</div>
+        <div class="meta">v{{ version }} · {{ model }} · {{ email_user or "email not configured" }}</div>
+      </div>
+      <nav class="tabs" aria-label="Views">
+        <button class="tab active" data-tab="jobs">Jobs</button>
+        <button class="tab" data-tab="profile">Core Profile</button>
+        <button class="tab" data-tab="email">Email</button>
+      </nav>
+    </header>
+
+    <main class="view active" id="jobs-view">
+      <section class="import-band">
+        <input id="job-url" type="url" placeholder="Job URL" />
+        <select id="import-method">
+          <option value="http">HTTP</option>
+          <option value="playwright">Rendered</option>
+        </select>
+        <button id="import-url">Import</button>
+        <button id="toggle-text-import">Text</button>
+      </section>
+      <section class="text-import hidden" id="text-import">
+        <textarea id="job-text" placeholder="Paste job text"></textarea>
+        <button id="import-text">Import Text</button>
+      </section>
+      <section class="workspace">
+        <aside class="job-list" id="job-list"></aside>
+        <section class="job-detail" id="job-detail">
+          <div class="empty-state">Select or import a job.</div>
+        </section>
+      </section>
+    </main>
+
+    <main class="view" id="profile-view">
+      <section class="editor-shell">
+        <div class="editor-header">
+          <div>
+            <h1>Core Profile</h1>
+            <span id="profile-version"></span>
+          </div>
+          <button id="save-profile">Save</button>
+        </div>
+        <textarea id="profile-editor"></textarea>
+      </section>
+    </main>
+
+    <main class="view" id="email-view">
+      <section class="email-actions">
+        <button id="sync-email">Sync Inbox</button>
+        <button id="test-email">Test SMTP</button>
+        <span id="email-status"></span>
+      </section>
+      <section class="email-list" id="email-list"></section>
+    </main>
+
+    <div class="toast hidden" id="toast"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
