@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -59,6 +59,25 @@ def clean_text(value: str | None, limit: int | None = None) -> str:
     text = re.sub(r"\s+", " ", value).strip()
     if limit and len(text) > limit:
         return text[:limit].rsplit(" ", 1)[0] + "..."
+    return text
+
+
+def clean_multiline_text(value: str | None, limit: int | None = None) -> str:
+    if not value:
+        return ""
+    lines: list[str] = []
+    previous_blank = False
+    for raw_line in value.splitlines():
+        line = clean_text(raw_line)
+        if line:
+            lines.append(line)
+            previous_blank = False
+        elif lines and not previous_blank:
+            lines.append("")
+            previous_blank = True
+    text = "\n".join(lines).strip()
+    if limit and len(text) > limit:
+        return text[:limit].rsplit("\n", 1)[0].strip() + "\n..."
     return text
 
 
@@ -241,10 +260,22 @@ async def _click_profile_expanders(page: Any) -> None:
     await page.evaluate(
         """
         () => {
-          const patterns = [/^see more$/i, /^show more$/i, /more about/i];
-          for (const node of document.querySelectorAll('button, a')) {
-            const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (!text || text.length > 80) continue;
+          const patterns = [
+            /^see more$/i,
+            /^show more$/i,
+            /more about/i,
+            /expand .*description/i,
+            /expand .*details/i
+          ];
+          for (const node of document.querySelectorAll('button, [role="button"]')) {
+            const parts = [
+              node.innerText || '',
+              node.textContent || '',
+              node.getAttribute('aria-label') || '',
+              node.getAttribute('title') || ''
+            ];
+            const text = parts.join(' ').replace(/\\s+/g, ' ').trim();
+            if (!text || text.length > 180) continue;
             if (patterns.some((pattern) => pattern.test(text))) {
               try { node.click(); } catch {}
             }
@@ -254,8 +285,9 @@ async def _click_profile_expanders(page: Any) -> None:
     )
 
 
-async def _scroll_linkedin_profile(page: Any) -> None:
-    for _ in range(config.LINKEDIN_PROFILE_SCROLL_PASSES):
+async def _scroll_linkedin_profile(page: Any, passes: int | None = None) -> None:
+    scroll_passes = passes if passes is not None else config.LINKEDIN_PROFILE_SCROLL_PASSES
+    for _ in range(scroll_passes):
         await page.evaluate("window.scrollBy(0, Math.max(window.innerHeight * 0.85, 600))")
         await page.wait_for_timeout(900)
         await _click_profile_expanders(page)
@@ -271,7 +303,7 @@ async def _install_linkedin_overlay(page: Any, mode: str) -> None:
         flag = "__jessaLoginContinueRequested"
     else:
         title = "JESSA LinkedIn Capture"
-        message = "Sign in if needed, scroll/expand the profile until it looks complete, then capture."
+        message = "Sign in if needed, then capture. JESSA will expand visible text and visit profile detail sections."
         button = "Capture profile now"
         flag = "__jessaCaptureRequested"
     await page.evaluate(
@@ -349,16 +381,144 @@ async def _wait_for_profile_capture_request(page: Any) -> None:
         await page.evaluate("document.getElementById('jessa-linkedin-overlay')?.remove()")
 
 
-async def _visible_body_text(page: Any) -> str:
+async def _visible_profile_text(page: Any) -> str:
     text = await page.evaluate(
         """
         () => {
           document.getElementById('jessa-linkedin-overlay')?.remove();
-          return document.body ? document.body.innerText : '';
+          const root = document.querySelector('main') || document.body;
+          return root ? root.innerText : '';
         }
         """
     )
-    return clean_text(text, limit=60000)
+    return clean_multiline_text(text, limit=60000)
+
+
+async def _visible_body_text(page: Any) -> str:
+    return await _visible_profile_text(page)
+
+
+LINKEDIN_PROFILE_DETAIL_SLUGS = (
+    "experience",
+    "education",
+    "certifications",
+    "skills",
+    "projects",
+    "volunteering-experiences",
+    "recommendations",
+    "honors",
+)
+
+LINKEDIN_PROFILE_DETAIL_LABELS = {
+    "experience": "Experience",
+    "education": "Education",
+    "certifications": "Licenses and Certifications",
+    "skills": "Skills",
+    "projects": "Projects",
+    "volunteering-experiences": "Volunteering",
+    "recommendations": "Recommendations",
+    "honors": "Honors and Awards",
+}
+
+
+def _normalize_linkedin_url(value: str) -> str:
+    url = value.strip()
+    if url and "://" not in url:
+        url = f"https://{url}"
+    return url
+
+
+def _linkedin_profile_base_url(url: str) -> str:
+    parsed = urlparse(_normalize_linkedin_url(url))
+    path = parsed.path or ""
+    if "/details/" in path:
+        path = path.split("/details/", 1)[0]
+    path = path.rstrip("/") or "/"
+    scheme = parsed.scheme or "https"
+    return f"{scheme}://{parsed.netloc}{path}/"
+
+
+def _normalize_linkedin_detail_url(url: str) -> str:
+    parsed = urlparse(_normalize_linkedin_url(url))
+    scheme = parsed.scheme or "https"
+    path = parsed.path.rstrip("/") + "/"
+    return f"{scheme}://{parsed.netloc}{path}"
+
+
+def _linkedin_profile_detail_slug(url: str) -> str:
+    path = urlparse(url).path
+    match = re.search(r"/details/([^/]+)/?", path)
+    return match.group(1) if match else ""
+
+
+def _linkedin_profile_detail_label(url: str) -> str:
+    slug = _linkedin_profile_detail_slug(url)
+    return LINKEDIN_PROFILE_DETAIL_LABELS.get(slug, slug.replace("-", " ").title() or "Detail")
+
+
+def _linkedin_profile_detail_urls(profile_url: str, html: str) -> list[str]:
+    base_url = _linkedin_profile_base_url(profile_url)
+    base_path = urlparse(base_url).path.rstrip("/")
+    detail_urls: list[str] = []
+    soup = BeautifulSoup(html, "html.parser")
+    for node in soup.find_all("a", href=True):
+        href = str(node.get("href") or "")
+        if "/details/" not in href:
+            continue
+        candidate = _normalize_linkedin_detail_url(urljoin(base_url, href))
+        parsed = urlparse(candidate)
+        if not is_linkedin_url(candidate):
+            continue
+        if not parsed.path.startswith(f"{base_path}/details/"):
+            continue
+        detail_urls.append(candidate)
+    for slug in LINKEDIN_PROFILE_DETAIL_SLUGS:
+        detail_urls.append(f"{base_url}details/{slug}/")
+    return list(dict.fromkeys(detail_urls))[:8]
+
+
+def _dedupe_linkedin_lines(text: str, seen: set[str]) -> str:
+    lines: list[str] = []
+    for line in text.splitlines():
+        clean_line = clean_text(line)
+        if not clean_line:
+            if lines and lines[-1]:
+                lines.append("")
+            continue
+        key = clean_line.lower()
+        if key in seen and len(clean_line) > 28:
+            continue
+        seen.add(key)
+        lines.append(clean_line)
+    return "\n".join(lines).strip()
+
+
+def _format_linkedin_profile_sections(sections: list[tuple[str, str, str]]) -> str:
+    seen: set[str] = set()
+    parts: list[str] = []
+    for label, url, text in sections:
+        deduped = _dedupe_linkedin_lines(text, seen)
+        if len(deduped) < 80:
+            continue
+        parts.append(f"## {label}\nSource: {url}\n\n{deduped}")
+    return "\n\n".join(parts).strip()
+
+
+async def _capture_linkedin_detail_sections(page: Any, profile_url: str, html: str) -> list[tuple[str, str, str]]:
+    sections: list[tuple[str, str, str]] = []
+    for detail_url in _linkedin_profile_detail_urls(profile_url, html):
+        try:
+            await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(1500)
+            if _linkedin_login_required(await page.content()):
+                continue
+            await _scroll_linkedin_profile(page, passes=min(config.LINKEDIN_PROFILE_SCROLL_PASSES, 4))
+            text = await _visible_profile_text(page)
+        except Exception:
+            continue
+        if len(text) >= 120:
+            sections.append((f"LinkedIn Detail: {_linkedin_profile_detail_label(detail_url)}", page.url, text))
+    return sections
 
 
 async def fetch_url_with_playwright(url: str) -> str:
@@ -467,6 +627,7 @@ async def import_from_url(url: str, method: str = "http") -> ImportedJob:
 
 
 async def fetch_linkedin_profile(url: str) -> LinkedInProfileSnapshot:
+    url = _normalize_linkedin_url(url)
     if not is_linkedin_url(url):
         raise RuntimeError("Provide a LinkedIn profile URL.")
     from playwright.async_api import async_playwright
@@ -482,12 +643,13 @@ async def fetch_linkedin_profile(url: str) -> LinkedInProfileSnapshot:
         context = await p.chromium.launch_persistent_context(**launch_args)
         try:
             page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            profile_url = _linkedin_profile_base_url(url)
+            await page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(2500)
             html = await page.content()
             if _linkedin_login_required(html):
                 await _wait_for_linkedin_login_continue(page)
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                await page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(2500)
                 html = await page.content()
             if _linkedin_login_required(html):
@@ -498,8 +660,11 @@ async def fetch_linkedin_profile(url: str) -> LinkedInProfileSnapshot:
             await _wait_for_profile_capture_request(page)
             await _scroll_linkedin_profile(page)
             html = await page.content()
-            content = await _visible_body_text(page)
+            main_text = await _visible_profile_text(page)
             title = clean_text(await page.title(), limit=200)
+            sections = [("LinkedIn Profile", page.url, main_text)]
+            sections.extend(await _capture_linkedin_detail_sections(page, profile_url, html))
+            content = _format_linkedin_profile_sections(sections)
         finally:
             await context.close()
     soup = BeautifulSoup(html, "html.parser")
@@ -510,11 +675,11 @@ async def fetch_linkedin_profile(url: str) -> LinkedInProfileSnapshot:
         title = clean_text(_meta_content(soup, ("property", "og:title"), ("name", "title")), limit=200)
     if len(content) < config.LINKEDIN_MIN_PROFILE_CONTENT_CHARS:
         raise RuntimeError(
-            "LinkedIn profile capture did not collect enough text. Sign in, open the full profile, "
-            "expand visible sections, then click the JESSA capture button."
+            "LinkedIn profile capture did not collect enough profile text. Sign in, open the full profile, "
+            "wait for it to finish loading, then click the JESSA capture button."
         )
     return LinkedInProfileSnapshot(
-        url=url,
+        url=profile_url,
         title=title,
         content=content,
         extraction_note="Cached from LinkedIn using the local persistent browser profile.",

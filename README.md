@@ -2,7 +2,7 @@
 
 JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `2.3.1`
+Current version: `2.3.2`
 
 ## v2.0 Scope
 
@@ -77,6 +77,7 @@ Current version: `2.3.1`
 - LinkedIn job URL imports use a local, visible, persistent browser profile.
 - LinkedIn URLs automatically switch the import method to `LinkedIn` in the UI.
 - Geoff's LinkedIn profile can be cached from a profile URL or saved from pasted profile text.
+- LinkedIn profile caching captures the main profile plus supported detail sections such as experience, education, certifications, skills, projects, volunteering, recommendations, and honors.
 - Cached LinkedIn profile content is appended to the candidate context for job analysis, application package generation, and supplemental answers.
 
 ## Setup
@@ -250,7 +251,7 @@ Paste application questions into `Supplemental Questions` and click `Generate An
 
 The core profile is the source of truth for future scoring and resume generation. Fix dates, titles, canonical bullets, and career rules here first. Every save increments the profile version.
 
-The LinkedIn Profile cache in this tab stores Geoff's current LinkedIn profile text separately from the canonical core profile. Use `Cache from URL` to open the persistent LinkedIn browser. If LinkedIn asks you to sign in, complete sign-in and click `I'm signed in, continue` in the JESSA overlay. Then review, scroll, and expand the profile until it looks complete, and click `Capture profile now`. JESSA refuses to save an empty or too-small browser capture. You can also paste profile text and use `Save Cache`. JESSA includes this cached profile as supporting context during job analysis and document generation.
+The LinkedIn Profile cache in this tab stores Geoff's current LinkedIn profile text separately from the canonical core profile. Use `Cache from URL` to open the persistent LinkedIn browser. If LinkedIn asks you to sign in, complete sign-in and click `I'm signed in, continue` in the JESSA overlay. Then click `Capture profile now`. JESSA expands visible profile text, visits supported `/details/...` profile sections, and refuses to save an empty or too-small browser capture. You can also paste profile text and use `Save Cache`. JESSA includes this cached profile as supporting context during job analysis and document generation.
 
 Resume-source rule: the Director and DevSecOps resumes are the preferred current version of the career history. The unabridged resume is retained for older detail and context, not as the primary canonical source when there is a conflict.
 
@@ -292,6 +293,12 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 2.3.2
+
+- Expanded LinkedIn profile caching to capture the main profile plus supported detail pages for collapsed profile sections.
+- Switched LinkedIn profile text capture to the profile main content instead of full-page navigation chrome.
+- Kept captured LinkedIn profile sections structured by source URL for review in the Core Profile tab.
 
 ### 2.3.1
 
