@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from html import escape as html_escape
+from html import unescape as html_unescape
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -251,7 +253,8 @@ async def fetch_url_with_persistent_browser(url: str, settle_ms: int | None = No
                 await _wait_for_linkedin_login_continue(page)
                 await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(settle)
-            return await page.content()
+            await _expand_linkedin_job_page(page)
+            return await _page_content_with_rendered_snapshot(page)
         finally:
             await context.close()
 
@@ -263,6 +266,8 @@ async def _click_profile_expanders(page: Any) -> None:
           const patterns = [
             /^see more$/i,
             /^show more$/i,
+            /^\\u2026 more$/i,
+            /^\\.\\.\\. more$/i,
             /more about/i,
             /expand .*description/i,
             /expand .*details/i
@@ -283,6 +288,39 @@ async def _click_profile_expanders(page: Any) -> None:
         }
         """
     )
+
+
+async def _expand_linkedin_job_page(page: Any) -> None:
+    await page.evaluate(
+        """
+        () => {
+          const patterns = [
+            /^see more$/i,
+            /^show more$/i,
+            /^\\u2026 more$/i,
+            /^\\.\\.\\. more$/i,
+            /show more/i,
+            /see more/i,
+            /expand .*job/i,
+            /expand .*description/i
+          ];
+          for (const node of document.querySelectorAll('button, [role="button"]')) {
+            const parts = [
+              node.innerText || '',
+              node.textContent || '',
+              node.getAttribute('aria-label') || '',
+              node.getAttribute('title') || ''
+            ];
+            const text = parts.join(' ').replace(/\\s+/g, ' ').trim();
+            if (!text || text.length > 180) continue;
+            if (patterns.some((pattern) => pattern.test(text))) {
+              try { node.click(); } catch {}
+            }
+          }
+        }
+        """
+    )
+    await page.wait_for_timeout(1000)
 
 
 async def _scroll_linkedin_profile(page: Any, passes: int | None = None) -> None:
@@ -396,6 +434,45 @@ async def _visible_profile_text(page: Any) -> str:
 
 async def _visible_body_text(page: Any) -> str:
     return await _visible_profile_text(page)
+
+
+RENDERED_PAGE_SNAPSHOT_ID = "jessa-rendered-page-snapshot"
+
+
+async def _page_content_with_rendered_snapshot(page: Any) -> str:
+    html = await page.content()
+    text = await page.evaluate(
+        """
+        () => {
+          const root = document.querySelector('main') || document.body;
+          return root ? root.innerText : '';
+        }
+        """
+    )
+    payload = json.dumps(
+        {
+            "url": page.url,
+            "title": await page.title(),
+            "text": text,
+        }
+    )
+    return (
+        f"{html}\n"
+        f'<template id="{RENDERED_PAGE_SNAPSHOT_ID}">{html_escape(payload, quote=False)}</template>'
+    )
+
+
+def _rendered_page_snapshot(soup: BeautifulSoup) -> dict[str, str]:
+    node = soup.find(id=RENDERED_PAGE_SNAPSHOT_ID)
+    if not node:
+        return {}
+    try:
+        payload = json.loads(html_unescape(node.get_text()))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): str(value or "") for key, value in payload.items()}
 
 
 LINKEDIN_PROFILE_DETAIL_SLUGS = (
@@ -537,12 +614,170 @@ async def fetch_url_with_playwright(url: str) -> str:
         return html
 
 
+LINKEDIN_WORK_MODES = {"remote", "hybrid", "on-site", "onsite", "on site"}
+LINKEDIN_JOB_TYPES = {
+    "full-time",
+    "part-time",
+    "contract",
+    "temporary",
+    "internship",
+    "volunteer",
+}
+
+
+def _linkedin_job_visible_lines(soup: BeautifulSoup, snapshot: dict[str, str]) -> list[str]:
+    text = snapshot.get("text", "")
+    if not text:
+        root = soup.find("main") or soup.body or soup
+        text = root.get_text("\n") if root else ""
+    text = clean_multiline_text(text, limit=60000)
+    return [clean_text(line) for line in text.splitlines() if clean_text(line)]
+
+
+def _linkedin_title_parts(title: str) -> list[str]:
+    parts = [clean_text(part) for part in title.split(" | ") if clean_text(part)]
+    while parts and parts[-1].lower() == "linkedin":
+        parts.pop()
+    return parts
+
+
+def _split_linkedin_meta_line(line: str) -> list[str]:
+    return [clean_text(part) for part in re.split(r"\s+[\u00b7\u2022]\s+", line) if clean_text(part)]
+
+
+def _is_work_mode(line: str) -> bool:
+    return clean_text(line).lower() in LINKEDIN_WORK_MODES
+
+
+def _is_job_type(line: str) -> bool:
+    return clean_text(line).lower() in LINKEDIN_JOB_TYPES
+
+
+def _linkedin_top_card_fields(lines: list[str], page_title: str) -> dict[str, str]:
+    fields = {"company": "", "title": "", "location": "", "posted_date": "", "job_type": ""}
+    if len(lines) >= 2:
+        fields["company"] = lines[0]
+        fields["title"] = lines[1]
+    if len(lines) >= 3:
+        meta_parts = _split_linkedin_meta_line(lines[2])
+        if meta_parts:
+            fields["location"] = meta_parts[0]
+        for part in meta_parts[1:]:
+            if re.search(r"\b(ago|posted|reposted)\b", part, flags=re.I):
+                fields["posted_date"] = part
+                break
+    for line in lines[3:9]:
+        if _is_work_mode(line) and line.lower() not in fields["location"].lower():
+            fields["location"] = clean_text(" - ".join(part for part in (fields["location"], line) if part))
+        elif _is_job_type(line) and not fields["job_type"]:
+            fields["job_type"] = line
+    title_parts = _linkedin_title_parts(page_title)
+    if title_parts:
+        if not fields["title"]:
+            fields["title"] = title_parts[0]
+            if len(title_parts) > 1 and _is_work_mode(title_parts[1]):
+                fields["title"] = f"{fields['title']} | {title_parts[1]}"
+        if not fields["company"] and len(title_parts) >= 2:
+            fields["company"] = title_parts[-1]
+    return fields
+
+
+def _linkedin_noise_line(line: str) -> bool:
+    normalized = clean_text(line).lower()
+    return normalized in {
+        "... more",
+        "\u2026 more",
+        "show more",
+        "show less",
+        "apply",
+        "save",
+        "message",
+    }
+
+
+def _linkedin_section(
+    lines: list[str],
+    start_label: str,
+    stop_patterns: tuple[str, ...],
+    limit: int = 120,
+) -> list[str]:
+    try:
+        start = next(index for index, line in enumerate(lines) if line.lower() == start_label.lower())
+    except StopIteration:
+        return []
+    output: list[str] = []
+    for line in lines[start + 1 :]:
+        if any(re.search(pattern, line, flags=re.I) for pattern in stop_patterns):
+            break
+        if _linkedin_noise_line(line):
+            continue
+        output.append(line)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def _linkedin_salary_line(lines: list[str]) -> str:
+    for line in lines[:120]:
+        if re.search(r"(\$\s?\d|USD\s?\d|salary|compensation|/[ ]?(hour|hr|year|yr))", line, flags=re.I):
+            return line
+    return ""
+
+
+def _linkedin_job_description(imported: ImportedJob, lines: list[str], fields: dict[str, str]) -> str:
+    about_job = _linkedin_section(
+        lines,
+        "About the job",
+        (
+            r"^This job alert is on$",
+            r"^Job search faster with Premium$",
+            r"^About the company$",
+            r"^Interested in working with us",
+            r"^More jobs$",
+        ),
+    )
+    about_company = _linkedin_section(
+        lines,
+        "About the company",
+        (
+            r"^Interested in working with us",
+            r"^More jobs$",
+            r"^Show more$",
+        ),
+        limit=80,
+    )
+    parts: list[str] = []
+    header = [
+        imported.title,
+        f"Company: {imported.company}" if imported.company else "",
+        f"Location: {imported.location}" if imported.location else "",
+        f"Posted: {imported.posted_date}" if imported.posted_date else "",
+        f"Job type: {fields.get('job_type')}" if fields.get("job_type") else "",
+    ]
+    parts.extend(part for part in header if part)
+    if about_job:
+        if parts:
+            parts.append("")
+        parts.append("About the job")
+        parts.extend(about_job)
+    if about_company:
+        if parts:
+            parts.append("")
+        parts.append("About the company")
+        parts.extend(about_company)
+    return clean_multiline_text("\n".join(parts), limit=30000)
+
+
 def parse_linkedin_html(url: str, html: str) -> ImportedJob:
     if _linkedin_login_required(html):
         raise RuntimeError(
             "LinkedIn login is required. Sign in using the browser window JESSA opened, then import again."
         )
     soup = BeautifulSoup(html, "html.parser")
+    snapshot = _rendered_page_snapshot(soup)
+    page_title = clean_text(snapshot.get("title") or (soup.title.string if soup.title else ""), limit=300)
+    visible_lines = _linkedin_job_visible_lines(soup, snapshot)
+    fallback_fields = _linkedin_top_card_fields(visible_lines, page_title)
     imported = ImportedJob(source="linkedin", url=url, apply_url=url)
     imported.title = _first_text(
         soup,
@@ -557,6 +792,8 @@ def parse_linkedin_html(url: str, html: str) -> ImportedJob:
     if not imported.title:
         title_meta = _meta_content(soup, ("property", "og:title"), ("name", "title"))
         imported.title = clean_text(title_meta.split("|", 1)[0], limit=200)
+    if not imported.title:
+        imported.title = clean_text(fallback_fields.get("title"), limit=200)
     imported.company = _first_text(
         soup,
         (
@@ -567,6 +804,8 @@ def parse_linkedin_html(url: str, html: str) -> ImportedJob:
         ),
         limit=160,
     )
+    if not imported.company:
+        imported.company = clean_text(fallback_fields.get("company"), limit=160)
     imported.location = _first_text(
         soup,
         (
@@ -576,6 +815,10 @@ def parse_linkedin_html(url: str, html: str) -> ImportedJob:
         ),
         limit=160,
     )
+    if not imported.location:
+        imported.location = clean_text(fallback_fields.get("location"), limit=160)
+    imported.posted_date = clean_text(fallback_fields.get("posted_date"), limit=80)
+    imported.salary = clean_text(_linkedin_salary_line(visible_lines), limit=160)
     description = _first_text(
         soup,
         (
@@ -587,8 +830,9 @@ def parse_linkedin_html(url: str, html: str) -> ImportedJob:
         ),
         limit=20000,
     )
-    imported.description = description or _main_text(soup)
-    imported.extraction_note = "Imported from LinkedIn using the local persistent browser profile."
+    linkedin_description = _linkedin_job_description(imported, visible_lines, fallback_fields)
+    imported.description = linkedin_description or description or _main_text(soup)
+    imported.extraction_note = "Imported from LinkedIn rendered page text using the local persistent browser profile."
     return imported
 
 

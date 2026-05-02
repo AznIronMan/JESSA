@@ -2,7 +2,7 @@
 
 JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `2.3.3`
+Current version: `2.3.4`
 
 ## v2.0 Scope
 
@@ -75,6 +75,7 @@ Current version: `2.3.3`
 ## v2.3 Scope
 
 - LinkedIn job URL imports use a local, visible, persistent browser profile.
+- LinkedIn job imports fall back to rendered visible text when LinkedIn's static selectors do not expose the top-card fields.
 - LinkedIn URLs automatically switch the import method to `LinkedIn` in the UI.
 - Geoff's LinkedIn profile can be cached from a profile URL or saved from pasted profile text.
 - LinkedIn profile caching captures the main profile plus supported detail sections such as experience, education, certifications, skills, projects, volunteering, recommendations, and honors.
@@ -293,6 +294,12 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 2.3.4
+
+- Improved LinkedIn job imports when LinkedIn omits the old top-card selectors from rendered HTML.
+- Added rendered visible-text fallback parsing for job title, company, location, posted date, and job type context.
+- Trimmed LinkedIn job descriptions to the actual job and company sections instead of surrounding LinkedIn UI.
 
 ### 2.3.3
 
