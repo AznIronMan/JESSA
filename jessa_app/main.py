@@ -457,6 +457,8 @@ async def fetch_cached_linkedin_profile(request: LinkedInProfileFetch) -> dict[s
         snapshot = await fetch_linkedin_profile(url)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if len(snapshot.content.strip()) < config.LINKEDIN_MIN_PROFILE_CONTENT_CHARS:
+        raise HTTPException(status_code=422, detail="LinkedIn profile capture did not collect enough text.")
     with get_db() as conn:
         return _upsert_linkedin_profile(
             conn,

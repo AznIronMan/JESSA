@@ -229,12 +229,136 @@ async def fetch_url_with_persistent_browser(url: str, settle_ms: int | None = No
             await page.wait_for_timeout(2500)
             html = await page.content()
             if _linkedin_login_required(html):
-                await page.wait_for_timeout(config.LINKEDIN_LOGIN_WAIT_MS)
+                await _wait_for_linkedin_login_continue(page)
                 await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(settle)
             return await page.content()
         finally:
             await context.close()
+
+
+async def _click_profile_expanders(page: Any) -> None:
+    await page.evaluate(
+        """
+        () => {
+          const patterns = [/^see more$/i, /^show more$/i, /more about/i];
+          for (const node of document.querySelectorAll('button, a')) {
+            const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (!text || text.length > 80) continue;
+            if (patterns.some((pattern) => pattern.test(text))) {
+              try { node.click(); } catch {}
+            }
+          }
+        }
+        """
+    )
+
+
+async def _scroll_linkedin_profile(page: Any) -> None:
+    for _ in range(config.LINKEDIN_PROFILE_SCROLL_PASSES):
+        await page.evaluate("window.scrollBy(0, Math.max(window.innerHeight * 0.85, 600))")
+        await page.wait_for_timeout(900)
+        await _click_profile_expanders(page)
+    await page.evaluate("window.scrollTo(0, 0)")
+    await page.wait_for_timeout(500)
+
+
+async def _install_linkedin_overlay(page: Any, mode: str) -> None:
+    if mode == "login":
+        title = "JESSA LinkedIn Sign-In"
+        message = "Finish signing into LinkedIn in this browser, then continue."
+        button = "I'm signed in, continue"
+        flag = "__jessaLoginContinueRequested"
+    else:
+        title = "JESSA LinkedIn Capture"
+        message = "Sign in if needed, scroll/expand the profile until it looks complete, then capture."
+        button = "Capture profile now"
+        flag = "__jessaCaptureRequested"
+    await page.evaluate(
+        """
+        ({title, message, button, flag}) => {
+          window[flag] = false;
+          document.getElementById('jessa-linkedin-overlay')?.remove();
+          const shell = document.createElement('div');
+          shell.id = 'jessa-linkedin-overlay';
+          shell.style.position = 'fixed';
+          shell.style.zIndex = '2147483647';
+          shell.style.right = '18px';
+          shell.style.bottom = '18px';
+          shell.style.maxWidth = '360px';
+          shell.style.padding = '14px';
+          shell.style.border = '1px solid #0f766e';
+          shell.style.borderRadius = '8px';
+          shell.style.background = '#ffffff';
+          shell.style.boxShadow = '0 10px 30px rgba(0,0,0,.2)';
+          shell.style.font = '14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif';
+          shell.style.color = '#17202a';
+          shell.innerHTML = `
+            <strong style="display:block;margin-bottom:6px;"></strong>
+            <div style="margin-bottom:10px;color:#475467;">
+            </div>
+            <button id="jessa-linkedin-overlay-button" style="height:34px;padding:0 12px;border:1px solid #0f766e;border-radius:6px;background:#0f766e;color:#fff;cursor:pointer;">
+            </button>
+          `;
+          shell.querySelector('strong').textContent = title;
+          shell.querySelector('div').textContent = message;
+          shell.querySelector('button').textContent = button;
+          document.body.appendChild(shell);
+          document.getElementById('jessa-linkedin-overlay-button')?.addEventListener('click', () => {
+            window[flag] = true;
+            shell.remove();
+          });
+        }
+        """,
+        {"title": title, "message": message, "button": button, "flag": flag},
+    )
+
+
+async def _wait_for_linkedin_login_continue(page: Any) -> None:
+    import time
+
+    await _install_linkedin_overlay(page, "login")
+    deadline = time.monotonic() + (config.LINKEDIN_LOGIN_WAIT_MS / 1000)
+    while time.monotonic() < deadline:
+        try:
+            if await page.evaluate("window.__jessaLoginContinueRequested === true"):
+                return
+            html = await page.content()
+            if not _linkedin_login_required(html):
+                await page.evaluate("document.getElementById('jessa-linkedin-overlay')?.remove()")
+                return
+            has_overlay = await page.evaluate("!!document.getElementById('jessa-linkedin-overlay')")
+            if not has_overlay:
+                await _install_linkedin_overlay(page, "login")
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
+    await page.evaluate("document.getElementById('jessa-linkedin-overlay')?.remove()")
+
+
+async def _wait_for_profile_capture_request(page: Any) -> None:
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    await _install_linkedin_overlay(page, "capture")
+    try:
+        await page.wait_for_function(
+            "window.__jessaCaptureRequested === true",
+            timeout=config.LINKEDIN_PROFILE_CAPTURE_WAIT_MS,
+        )
+    except PlaywrightTimeoutError:
+        await page.evaluate("document.getElementById('jessa-linkedin-overlay')?.remove()")
+
+
+async def _visible_body_text(page: Any) -> str:
+    text = await page.evaluate(
+        """
+        () => {
+          document.getElementById('jessa-linkedin-overlay')?.remove();
+          return document.body ? document.body.innerText : '';
+        }
+        """
+    )
+    return clean_text(text, limit=60000)
 
 
 async def fetch_url_with_playwright(url: str) -> str:
@@ -345,16 +469,50 @@ async def import_from_url(url: str, method: str = "http") -> ImportedJob:
 async def fetch_linkedin_profile(url: str) -> LinkedInProfileSnapshot:
     if not is_linkedin_url(url):
         raise RuntimeError("Provide a LinkedIn profile URL.")
-    html = await fetch_url_with_persistent_browser(url)
-    if _linkedin_login_required(html):
-        raise RuntimeError(
-            "LinkedIn login is required. Sign in using the browser window JESSA opened, then cache again."
-        )
+    from playwright.async_api import async_playwright
+
+    config.LINKEDIN_BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    async with async_playwright() as p:
+        launch_args: dict[str, Any] = {
+            "headless": False,
+            "user_data_dir": str(config.LINKEDIN_BROWSER_PROFILE_DIR),
+        }
+        if config.PLAYWRIGHT_BROWSER_PATH:
+            launch_args["executable_path"] = config.PLAYWRIGHT_BROWSER_PATH
+        context = await p.chromium.launch_persistent_context(**launch_args)
+        try:
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2500)
+            html = await page.content()
+            if _linkedin_login_required(html):
+                await _wait_for_linkedin_login_continue(page)
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(2500)
+                html = await page.content()
+            if _linkedin_login_required(html):
+                raise RuntimeError(
+                    "LinkedIn login is still required. Sign in using the browser window, then cache again."
+                )
+            await _scroll_linkedin_profile(page)
+            await _wait_for_profile_capture_request(page)
+            await _scroll_linkedin_profile(page)
+            html = await page.content()
+            content = await _visible_body_text(page)
+            title = clean_text(await page.title(), limit=200)
+        finally:
+            await context.close()
     soup = BeautifulSoup(html, "html.parser")
-    title = _first_text(soup, ("h1", ".text-heading-xlarge"), limit=200)
+    heading = _first_text(soup, ("h1", ".text-heading-xlarge"), limit=200)
+    if heading:
+        title = heading
     if not title:
         title = clean_text(_meta_content(soup, ("property", "og:title"), ("name", "title")), limit=200)
-    content = _main_text(soup)
+    if len(content) < config.LINKEDIN_MIN_PROFILE_CONTENT_CHARS:
+        raise RuntimeError(
+            "LinkedIn profile capture did not collect enough text. Sign in, open the full profile, "
+            "expand visible sections, then click the JESSA capture button."
+        )
     return LinkedInProfileSnapshot(
         url=url,
         title=title,

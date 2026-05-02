@@ -683,8 +683,8 @@ async function saveLinkedInProfile() {
 }
 
 async function fetchLinkedInProfileCache() {
-  $("#linkedin-profile-status").textContent = "caching...";
-  toast("Opening LinkedIn profile cache browser...");
+  $("#linkedin-profile-status").textContent = "waiting for browser capture...";
+  toast("Use the LinkedIn browser buttons: sign in, continue, then capture.");
   const profile = await api("/api/linkedin-profile/fetch", {
     method: "POST",
     body: JSON.stringify({ url: $("#linkedin-profile-url").value }),
