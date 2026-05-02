@@ -40,7 +40,7 @@ then
   exit 1
 fi
 
-echo "Initializing database..."
+echo "Initializing PostgreSQL database..."
 .venv/bin/python -c 'from jessa_app.db import init_db; init_db()'
 
 echo "Starting JESSA on $HOST:$PORT"

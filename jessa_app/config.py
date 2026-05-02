@@ -89,7 +89,19 @@ ALLOWED_CLIENT_NETWORKS = _parse_client_networks(
     os.getenv("JESSA_ALLOWED_CLIENT_NETWORKS", DEFAULT_ALLOWED_CLIENT_NETWORKS)
 )
 
-DB_PATH = (BASE_DIR / os.getenv("JESSA_DB_PATH", "data/jessa.sqlite3")).resolve()
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "").strip()
+POSTGRES_PORT = _int("POSTGRES_PORT", 5432)
+POSTGRES_USER = os.getenv("POSTGRES_USER", "").strip()
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", os.getenv("POSTGRES_PASS", "")).strip()
+POSTGRES_DB_NAME = os.getenv("POSTGRES_DB_NAME", os.getenv("POSTGRES_DB", "")).strip()
+POSTGRES_SSLMODE = os.getenv("POSTGRES_SSLMODE", "prefer").strip() or "prefer"
+POSTGRES_CONNECT_TIMEOUT = _int("POSTGRES_CONNECT_TIMEOUT", 10)
+POSTGRES_MAINTENANCE_DB = os.getenv("POSTGRES_MAINTENANCE_DB", "postgres").strip() or "postgres"
+
+DB_BACKEND = "postgresql"
+SQLITE_IMPORT_PATH = (
+    BASE_DIR / os.getenv("JESSA_SQLITE_IMPORT_PATH", os.getenv("JESSA_DB_PATH", "data/jessa.sqlite3"))
+).resolve()
 PROFILE_SOURCE = (BASE_DIR / os.getenv("JESSA_PROFILE_SOURCE", "jessa_gpt_instructions.txt")).resolve()
 
 def _default_resume_dir() -> Path:
@@ -127,3 +139,7 @@ def client_host_allowed(host: str | None) -> bool:
     if client_ip is None:
         return False
     return any(client_ip in network for network in ALLOWED_CLIENT_NETWORKS)
+
+
+def postgres_configured() -> bool:
+    return bool(POSTGRES_HOST and POSTGRES_USER and POSTGRES_DB_NAME)

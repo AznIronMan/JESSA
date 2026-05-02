@@ -1,13 +1,14 @@
 # JESSA
 
-JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in SQLite, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
+JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `1.1.2`
+Current version: `2.0.0`
 
-## v1.1 Scope
+## v2.0 Scope
 
 - Local FastAPI web app with static HTML/CSS/JS.
-- SQLite persistence in `data/jessa.sqlite3`.
+- PostgreSQL persistence for all runtime application data.
+- One-time legacy SQLite import from `data/jessa.sqlite3` through `scripts/migrate_sqlite_to_postgres.py`.
 - Editable core profile seeded from `jessa_gpt_instructions.txt`.
 - Job import from URL with HTTP + BeautifulSoup extraction.
 - Optional rendered-page import through Playwright.
@@ -118,6 +119,12 @@ OPENAI_MODEL=gpt-5.4-mini
 
 EMAIL_USER=geoff@example.com
 EMAIL_APP_PASSWORD=...
+
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5432
+POSTGRES_USER=jessa
+POSTGRES_PASS=...
+POSTGRES_DB_NAME=jessa
 ```
 
 Google Workspace/Gmail defaults are inferred:
@@ -133,9 +140,14 @@ EMAIL_FROM=$EMAIL_USER
 Optional app path overrides:
 
 ```bash
-JESSA_DB_PATH=data/jessa.sqlite3
 JESSA_PROFILE_SOURCE=jessa_gpt_instructions.txt
 JESSA_RESUME_DIR=~/Documents/job_hunting
+```
+
+Legacy SQLite import path:
+
+```bash
+JESSA_SQLITE_IMPORT_PATH=data/jessa.sqlite3
 ```
 
 LAN access defaults:
@@ -145,6 +157,31 @@ JESSA_ALLOWED_CLIENT_NETWORKS=127.0.0.0/8,::1/128,10.0.0.0/8
 ```
 
 Use `./stop_jessa.sh` to stop a running JESSA web app process started from this project.
+
+## SQLite to PostgreSQL Migration
+
+JESSA 2.x uses PostgreSQL for runtime storage. The legacy SQLite file is only an import source.
+
+After adding the PostgreSQL settings to `.env`, run:
+
+```bash
+source .venv/bin/activate
+python scripts/migrate_sqlite_to_postgres.py
+```
+
+The PostgreSQL server must allow the configured app host to connect to the configured database as the configured user. On self-managed PostgreSQL, that usually means the database exists, the role exists, and `pg_hba.conf` has a narrow host rule for this app host.
+
+The migration script:
+
+- validates the SQLite source with `PRAGMA integrity_check`;
+- creates a timestamped SQLite backup under `data/backups/`;
+- creates the configured PostgreSQL database when the configured user has permission;
+- creates the PostgreSQL schema;
+- copies rows with their original IDs;
+- resets PostgreSQL identity sequences;
+- verifies table counts before reporting success.
+
+Do not delete `data/jessa.sqlite3` until the migration reports matching counts and `/api/health` shows `db_backend` as `postgresql`.
 
 Google Workspace notes:
 
@@ -172,11 +209,11 @@ Resume-source rule: the Director and DevSecOps resumes are the preferred current
 
 ### Email
 
-`Sync Inbox` checks recent inbox messages, classifies job-search mail, and links messages to jobs by company/title when possible. `Test SMTP` only verifies login; v1.0 does not auto-send email.
+`Sync Inbox` checks recent inbox messages, classifies job-search mail, and links messages to jobs by company/title when possible. `Test SMTP` only verifies login; JESSA does not auto-send email.
 
 ## Data Model
 
-SQLite tables:
+PostgreSQL tables:
 
 - `core_profile`
 - `jobs`
@@ -203,6 +240,13 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 2.0.0
+
+- Moved runtime persistence from SQLite to PostgreSQL.
+- Added PostgreSQL environment settings and health output.
+- Added `scripts/migrate_sqlite_to_postgres.py` to safely import the existing SQLite data without changing the source file.
+- Kept the legacy SQLite path only as a migration input.
 
 ### 1.1.2
 

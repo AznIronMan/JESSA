@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import shutil
+import sqlite3
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT_DIR))
+
+from psycopg import errors, sql  # noqa: E402
+
+from jessa_app import config, db  # noqa: E402
+
+
+TABLE_COLUMNS = {
+    "core_profile": ("id", "content", "version", "updated_at"),
+    "jobs": (
+        "id",
+        "source",
+        "url",
+        "apply_url",
+        "title",
+        "company",
+        "location",
+        "salary",
+        "posted_date",
+        "description",
+        "status",
+        "match_score",
+        "qualification_band",
+        "interview_odds",
+        "interview_confidence",
+        "salary_ask_range",
+        "salary_floor",
+        "resume_base",
+        "recommendation",
+        "analysis_summary",
+        "analysis_json",
+        "cover_letter",
+        "resume_notes",
+        "status_updated_at",
+        "created_at",
+        "updated_at",
+    ),
+    "job_events": ("id", "job_id", "event_type", "note", "created_at"),
+    "emails": (
+        "id",
+        "message_id",
+        "job_id",
+        "subject",
+        "sender",
+        "received_at",
+        "classification",
+        "confidence",
+        "summary",
+        "raw_excerpt",
+        "created_at",
+    ),
+    "application_artifacts": (
+        "id",
+        "job_id",
+        "artifact_type",
+        "title",
+        "content",
+        "format",
+        "version",
+        "source_profile_version",
+        "is_submitted",
+        "submitted_at",
+        "created_at",
+        "updated_at",
+    ),
+}
+
+SEQUENCE_TABLES = ("jobs", "job_events", "emails", "application_artifacts")
+APPLICATION_TABLES = ("jobs", "job_events", "emails", "application_artifacts")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Copy JESSA data from the legacy SQLite file into the configured PostgreSQL database."
+    )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=config.SQLITE_IMPORT_PATH,
+        help="SQLite source path. Defaults to JESSA_SQLITE_IMPORT_PATH or legacy JESSA_DB_PATH.",
+    )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="Allow importing into a PostgreSQL database that already has application rows.",
+    )
+    return parser.parse_args()
+
+
+def ensure_target_database() -> bool:
+    try:
+        conn = db.connect_raw(config.POSTGRES_DB_NAME)
+    except errors.InvalidCatalogName:
+        maintenance = db.connect_raw(config.POSTGRES_MAINTENANCE_DB)
+        try:
+            maintenance.autocommit = True
+            row = maintenance.execute(
+                "SELECT 1 AS exists FROM pg_database WHERE datname = %s",
+                (config.POSTGRES_DB_NAME,),
+            ).fetchone()
+            if row:
+                return False
+            maintenance.execute(
+                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(config.POSTGRES_DB_NAME))
+            )
+            return True
+        finally:
+            maintenance.close()
+    else:
+        conn.close()
+        return False
+
+
+def sqlite_connect(path: Path) -> sqlite3.Connection:
+    if not path.exists():
+        raise SystemExit(f"SQLite source does not exist: {path}")
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def validate_sqlite(conn: sqlite3.Connection) -> None:
+    result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+    if result != "ok":
+        raise SystemExit(f"SQLite integrity check failed: {result}")
+
+
+def backup_sqlite(path: Path) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"{path.name}.pre-postgres-{stamp}"
+    shutil.copy2(path, backup_path)
+    return backup_path
+
+
+def sqlite_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    return {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in TABLE_COLUMNS}
+
+
+def postgres_counts(conn: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for table in TABLE_COLUMNS:
+        row = conn.execute(sql.SQL("SELECT COUNT(*) AS count FROM {}").format(sql.Identifier(table))).fetchone()
+        counts[table] = int(row["count"])
+    return counts
+
+
+def table_rows(conn: sqlite3.Connection, table: str) -> list[dict[str, Any]]:
+    columns = TABLE_COLUMNS[table]
+    column_sql = ", ".join(columns)
+    return [dict(row) for row in conn.execute(f"SELECT {column_sql} FROM {table} ORDER BY id").fetchall()]
+
+
+def upsert_rows(conn: Any, table: str, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    columns = TABLE_COLUMNS[table]
+    assignments = [
+        sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(column), sql.Identifier(column))
+        for column in columns
+        if column != "id"
+    ]
+    statement = sql.SQL(
+        """
+        INSERT INTO {} ({})
+        VALUES ({})
+        ON CONFLICT (id) DO UPDATE SET {}
+        """
+    ).format(
+        sql.Identifier(table),
+        sql.SQL(", ").join(sql.Identifier(column) for column in columns),
+        sql.SQL(", ").join(sql.Placeholder() for _ in columns),
+        sql.SQL(", ").join(assignments),
+    )
+    for row in rows:
+        conn.execute(statement, [row[column] for column in columns])
+
+
+def reset_identity_sequences(conn: Any) -> None:
+    for table in SEQUENCE_TABLES:
+        conn.execute(
+            sql.SQL(
+                """
+                SELECT setval(
+                    pg_get_serial_sequence(%s, 'id'),
+                    COALESCE((SELECT MAX(id) FROM {}), 1),
+                    (SELECT COUNT(*) > 0 FROM {})
+                )
+                """
+            ).format(sql.Identifier(table), sql.Identifier(table)),
+            (table,),
+        )
+
+
+def format_counts(counts: dict[str, int]) -> str:
+    return ", ".join(f"{table}={count}" for table, count in counts.items())
+
+
+def main() -> int:
+    args = parse_args()
+    source_path = args.source.expanduser().resolve()
+
+    source = sqlite_connect(source_path)
+    try:
+        validate_sqlite(source)
+        backup_path = backup_sqlite(source_path)
+        source_counts = sqlite_counts(source)
+
+        created = ensure_target_database()
+        db.init_db()
+
+        target = db.connect_raw(config.POSTGRES_DB_NAME)
+        try:
+            before_counts = postgres_counts(target)
+            if not args.merge and any(before_counts[table] for table in APPLICATION_TABLES):
+                raise SystemExit(
+                    "PostgreSQL target already has application rows. "
+                    "Use --merge only if you intentionally want to upsert from SQLite."
+                )
+            for table in TABLE_COLUMNS:
+                upsert_rows(target, table, table_rows(source, table))
+            reset_identity_sequences(target)
+            target.commit()
+            target_counts = postgres_counts(target)
+        except Exception:
+            target.rollback()
+            raise
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+    if source_counts != target_counts:
+        raise SystemExit(
+            "Migration count mismatch. "
+            f"SQLite: {format_counts(source_counts)}; PostgreSQL: {format_counts(target_counts)}"
+        )
+
+    print("PostgreSQL database created: " + str(created))
+    print("SQLite backup: " + str(backup_path))
+    print("Migrated row counts: " + format_counts(target_counts))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -142,11 +142,13 @@ def _insert_artifact(
             source_profile_version, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, 'markdown', ?, ?, ?, ?)
+        RETURNING id
         """,
         (job_id, artifact_type, title, content, version, profile_version, now, now),
     )
     log_event(conn, job_id, f"artifact:{artifact_type}", f"Created {title} v{version}")
-    return int(cur.lastrowid)
+    row = cur.fetchone()
+    return int(row["id"])
 
 
 def _insert_or_update_job(conn, imported: ImportedJob) -> int:
@@ -200,10 +202,12 @@ def _insert_or_update_job(conn, imported: ImportedJob) -> int:
             description, status_updated_at, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
         """,
         values,
     )
-    job_id = int(cur.lastrowid)
+    row = cur.fetchone()
+    job_id = int(row["id"])
     log_event(conn, job_id, "imported", imported.extraction_note)
     return job_id
 
@@ -231,7 +235,11 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "version": __version__,
-        "db_path": str(config.DB_PATH),
+        "db_backend": config.DB_BACKEND,
+        "postgres_configured": config.postgres_configured(),
+        "postgres_host": config.POSTGRES_HOST,
+        "postgres_port": config.POSTGRES_PORT,
+        "postgres_database": config.POSTGRES_DB_NAME,
         "openai_configured": bool(config.OPENAI_API_KEY),
         "email_configured": bool(config.EMAIL_USER and config.EMAIL_PASSWORD),
         "email_imap_host": config.EMAIL_IMAP_HOST,
@@ -496,11 +504,12 @@ def email_sync() -> dict[str, Any]:
         for message in messages:
             cur = conn.execute(
                 """
-                INSERT OR IGNORE INTO emails (
+                INSERT INTO emails (
                     message_id, job_id, subject, sender, received_at, classification,
                     confidence, summary, raw_excerpt, created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (message_id) DO NOTHING
                 """,
                 (
                     message.message_id,
