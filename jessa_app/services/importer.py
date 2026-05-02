@@ -32,12 +32,25 @@ class ImportedJob:
     extraction_note: str = ""
 
 
+@dataclass
+class LinkedInProfileSnapshot:
+    url: str = ""
+    title: str = ""
+    content: str = ""
+    extraction_note: str = ""
+
+
 def source_from_url(url: str) -> str:
     host = urlparse(url).netloc.lower()
     for marker in ("indeed", "dice", "ziprecruiter", "linkedin", "greenhouse", "lever", "ashby", "workday"):
         if marker in host:
             return marker
     return host.replace("www.", "") or "url"
+
+
+def is_linkedin_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return host == "linkedin.com" or host.endswith(".linkedin.com")
 
 
 def clean_text(value: str | None, limit: int | None = None) -> str:
@@ -146,6 +159,26 @@ def _extract_json_ld(soup: BeautifulSoup) -> dict[str, Any] | None:
     return None
 
 
+def _first_text(soup: BeautifulSoup, selectors: tuple[str, ...], limit: int | None = None) -> str:
+    for selector in selectors:
+        node = soup.select_one(selector)
+        if node:
+            text = clean_text(node.get_text(" "), limit=limit)
+            if text:
+                return text
+    return ""
+
+
+def _meta_content(soup: BeautifulSoup, *keys: tuple[str, str]) -> str:
+    for attr, value in keys:
+        node = soup.find("meta", attrs={attr: value})
+        if node:
+            content = clean_text(node.get("content", ""))
+            if content:
+                return content
+    return ""
+
+
 def _main_text(soup: BeautifulSoup) -> str:
     for tag in soup(["script", "style", "noscript", "svg", "header", "footer", "nav", "aside"]):
         tag.decompose()
@@ -160,11 +193,48 @@ def _main_text(soup: BeautifulSoup) -> str:
     return clean_text(candidate.get_text(" "), limit=20000)
 
 
+def _linkedin_login_required(html: str) -> bool:
+    lowered = html.lower()
+    return (
+        "sign in | linkedin" in lowered
+        or "login-submit" in lowered
+        or "session_key" in lowered
+        or "/uas/login" in lowered
+    )
+
+
 async def fetch_url(url: str) -> str:
     async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
         response = await client.get(url)
         response.raise_for_status()
         return response.text
+
+
+async def fetch_url_with_persistent_browser(url: str, settle_ms: int | None = None) -> str:
+    from playwright.async_api import async_playwright
+
+    settle = settle_ms if settle_ms is not None else config.LINKEDIN_PAGE_SETTLE_MS
+    config.LINKEDIN_BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    async with async_playwright() as p:
+        launch_args: dict[str, Any] = {
+            "headless": False,
+            "user_data_dir": str(config.LINKEDIN_BROWSER_PROFILE_DIR),
+        }
+        if config.PLAYWRIGHT_BROWSER_PATH:
+            launch_args["executable_path"] = config.PLAYWRIGHT_BROWSER_PATH
+        context = await p.chromium.launch_persistent_context(**launch_args)
+        try:
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2500)
+            html = await page.content()
+            if _linkedin_login_required(html):
+                await page.wait_for_timeout(config.LINKEDIN_LOGIN_WAIT_MS)
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(settle)
+            return await page.content()
+        finally:
+            await context.close()
 
 
 async def fetch_url_with_playwright(url: str) -> str:
@@ -181,6 +251,61 @@ async def fetch_url_with_playwright(url: str) -> str:
         html = await page.content()
         await browser.close()
         return html
+
+
+def parse_linkedin_html(url: str, html: str) -> ImportedJob:
+    if _linkedin_login_required(html):
+        raise RuntimeError(
+            "LinkedIn login is required. Sign in using the browser window JESSA opened, then import again."
+        )
+    soup = BeautifulSoup(html, "html.parser")
+    imported = ImportedJob(source="linkedin", url=url, apply_url=url)
+    imported.title = _first_text(
+        soup,
+        (
+            "h1",
+            ".jobs-unified-top-card__job-title",
+            ".job-details-jobs-unified-top-card__job-title",
+            ".top-card-layout__title",
+        ),
+        limit=200,
+    )
+    if not imported.title:
+        title_meta = _meta_content(soup, ("property", "og:title"), ("name", "title"))
+        imported.title = clean_text(title_meta.split("|", 1)[0], limit=200)
+    imported.company = _first_text(
+        soup,
+        (
+            ".job-details-jobs-unified-top-card__company-name",
+            ".jobs-unified-top-card__company-name",
+            ".topcard__org-name-link",
+            'a[href*="/company/"]',
+        ),
+        limit=160,
+    )
+    imported.location = _first_text(
+        soup,
+        (
+            ".job-details-jobs-unified-top-card__primary-description-container",
+            ".jobs-unified-top-card__bullet",
+            ".topcard__flavor--bullet",
+        ),
+        limit=160,
+    )
+    description = _first_text(
+        soup,
+        (
+            "#job-details",
+            ".jobs-description__content",
+            ".jobs-box__html-content",
+            ".description__text",
+            ".show-more-less-html__markup",
+        ),
+        limit=20000,
+    )
+    imported.description = description or _main_text(soup)
+    imported.extraction_note = "Imported from LinkedIn using the local persistent browser profile."
+    return imported
 
 
 def parse_html(url: str, html: str) -> ImportedJob:
@@ -210,8 +335,32 @@ def parse_html(url: str, html: str) -> ImportedJob:
 
 async def import_from_url(url: str, method: str = "http") -> ImportedJob:
     method = (method or "http").lower()
+    if is_linkedin_url(url) and method in {"http", "playwright", "linkedin", "auto"}:
+        html = await fetch_url_with_persistent_browser(url)
+        return parse_linkedin_html(url, html)
     html = await fetch_url_with_playwright(url) if method == "playwright" else await fetch_url(url)
     return parse_html(url, html)
+
+
+async def fetch_linkedin_profile(url: str) -> LinkedInProfileSnapshot:
+    if not is_linkedin_url(url):
+        raise RuntimeError("Provide a LinkedIn profile URL.")
+    html = await fetch_url_with_persistent_browser(url)
+    if _linkedin_login_required(html):
+        raise RuntimeError(
+            "LinkedIn login is required. Sign in using the browser window JESSA opened, then cache again."
+        )
+    soup = BeautifulSoup(html, "html.parser")
+    title = _first_text(soup, ("h1", ".text-heading-xlarge"), limit=200)
+    if not title:
+        title = clean_text(_meta_content(soup, ("property", "og:title"), ("name", "title")), limit=200)
+    content = _main_text(soup)
+    return LinkedInProfileSnapshot(
+        url=url,
+        title=title,
+        content=content,
+        extraction_note="Cached from LinkedIn using the local persistent browser profile.",
+    )
 
 
 def import_from_text(text: str) -> ImportedJob:

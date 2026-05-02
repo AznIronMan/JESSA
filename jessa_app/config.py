@@ -103,6 +103,13 @@ SQLITE_IMPORT_PATH = (
     BASE_DIR / os.getenv("JESSA_SQLITE_IMPORT_PATH", os.getenv("JESSA_DB_PATH", "data/jessa.sqlite3"))
 ).resolve()
 PROFILE_SOURCE = (BASE_DIR / os.getenv("JESSA_PROFILE_SOURCE", "jessa_gpt_instructions.txt")).resolve()
+LINKEDIN_PROFILE_URL = os.getenv("JESSA_LINKEDIN_PROFILE_URL", "").strip()
+LINKEDIN_BROWSER_PROFILE_DIR = (
+    BASE_DIR / os.getenv("JESSA_LINKEDIN_BROWSER_PROFILE_DIR", "data/linkedin-browser")
+).expanduser().resolve()
+LINKEDIN_PAGE_SETTLE_MS = _int("JESSA_LINKEDIN_PAGE_SETTLE_MS", 7000)
+LINKEDIN_LOGIN_WAIT_MS = _int("JESSA_LINKEDIN_LOGIN_WAIT_MS", 45000)
+
 
 def _default_resume_dir() -> Path:
     home = Path.home()

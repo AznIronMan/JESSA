@@ -24,6 +24,7 @@
         <input id="job-url" type="url" placeholder="Job URL" />
         <select id="import-method">
           <option value="http">HTTP</option>
+          <option value="linkedin">LinkedIn</option>
           <option value="playwright">Rendered</option>
         </select>
         <button id="import-url">Import</button>
@@ -78,6 +79,21 @@
           </div>
           <button id="save-profile">Save</button>
         </div>
+        <section class="linkedin-profile-panel">
+          <div class="section-title-row">
+            <div>
+              <h2>LinkedIn Profile</h2>
+              <span id="linkedin-profile-status"></span>
+            </div>
+            <div class="linkedin-profile-actions">
+              <button id="fetch-linkedin-profile">Cache from URL</button>
+              <button id="save-linkedin-profile">Save Cache</button>
+            </div>
+          </div>
+          <input id="linkedin-profile-url" type="url" placeholder="https://www.linkedin.com/in/..." />
+          <input id="linkedin-profile-title" placeholder="Profile title" />
+          <textarea id="linkedin-profile-cache" placeholder="Paste Geoff's LinkedIn profile text or cache it from the URL"></textarea>
+        </section>
         <textarea id="profile-editor"></textarea>
       </section>
     </main>

@@ -29,7 +29,7 @@ from .db import (
     utc_now,
 )
 from .services.email_client import sync_inbox, test_smtp
-from .services.importer import ImportedJob, import_from_text, import_from_url
+from .services.importer import ImportedJob, fetch_linkedin_profile, import_from_text, import_from_url
 from .services.llm import analyze_job, answer_supplemental_questions, generate_application_package
 from .services.pdf import markdown_to_pdf
 
@@ -63,6 +63,16 @@ class ImportRequest(BaseModel):
 
 class ProfileUpdate(BaseModel):
     content: str
+
+
+class LinkedInProfileUpdate(BaseModel):
+    url: str = ""
+    title: str = ""
+    content: str = ""
+
+
+class LinkedInProfileFetch(BaseModel):
+    url: str = ""
 
 
 class JobUpdate(BaseModel):
@@ -165,6 +175,55 @@ def _profile(conn) -> dict[str, Any]:
     if not item:
         raise HTTPException(status_code=500, detail="Core profile is missing.")
     return item
+
+
+def _linkedin_profile(conn) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM linkedin_profile_cache WHERE id = 1").fetchone()
+    item = row_to_dict(row)
+    if item:
+        return item
+    return {
+        "id": 1,
+        "url": config.LINKEDIN_PROFILE_URL,
+        "title": "",
+        "content": "",
+        "fetched_at": None,
+        "updated_at": None,
+    }
+
+
+def _upsert_linkedin_profile(conn, url: str, title: str, content: str, fetched_at: str | None = None) -> dict[str, Any]:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO linkedin_profile_cache (id, url, title, content, fetched_at, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET
+            url = EXCLUDED.url,
+            title = EXCLUDED.title,
+            content = EXCLUDED.content,
+            fetched_at = EXCLUDED.fetched_at,
+            updated_at = EXCLUDED.updated_at
+        """,
+        (url, title, content, fetched_at, now),
+    )
+    return _linkedin_profile(conn)
+
+
+def _profile_context(conn) -> tuple[dict[str, Any], str]:
+    profile = _profile(conn)
+    linkedin = _linkedin_profile(conn)
+    profile_text = str(profile["content"])
+    linkedin_content = str(linkedin.get("content") or "").strip()
+    if linkedin_content:
+        profile_text = (
+            f"{profile_text}\n\n"
+            "# Cached LinkedIn Profile Context\n\n"
+            f"Source URL: {linkedin.get('url') or 'Not recorded'}\n"
+            f"Cached At: {linkedin.get('fetched_at') or linkedin.get('updated_at') or 'Not recorded'}\n\n"
+            f"{linkedin_content}"
+        )
+    return profile, profile_text
 
 
 def _get_job(conn, job_id: int) -> dict[str, Any]:
@@ -320,6 +379,15 @@ def index(request: Request) -> HTMLResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    linkedin_cached = False
+    linkedin_url = config.LINKEDIN_PROFILE_URL
+    try:
+        with get_db() as conn:
+            linkedin = _linkedin_profile(conn)
+            linkedin_cached = bool(str(linkedin.get("content") or "").strip())
+            linkedin_url = str(linkedin.get("url") or linkedin_url)
+    except Exception:
+        linkedin_cached = False
     return {
         "ok": True,
         "version": __version__,
@@ -335,6 +403,9 @@ def health() -> dict[str, Any]:
         "allowed_client_networks": config.allowed_client_networks(),
         "playwright_browser_path": config.PLAYWRIGHT_BROWSER_PATH,
         "trash_retention_hours": TRASH_RETENTION_HOURS,
+        "linkedin_profile_cached": linkedin_cached,
+        "linkedin_profile_url": linkedin_url,
+        "linkedin_browser_profile_dir": str(config.LINKEDIN_BROWSER_PROFILE_DIR),
     }
 
 
@@ -354,6 +425,46 @@ def update_profile(update: ProfileUpdate) -> dict[str, Any]:
             (update.content, version, utc_now()),
         )
         return _profile(conn)
+
+
+@app.get("/api/linkedin-profile")
+def get_linkedin_profile() -> dict[str, Any]:
+    with get_db() as conn:
+        return _linkedin_profile(conn)
+
+
+@app.put("/api/linkedin-profile")
+def update_linkedin_profile(update: LinkedInProfileUpdate) -> dict[str, Any]:
+    with get_db() as conn:
+        return _upsert_linkedin_profile(
+            conn,
+            update.url.strip(),
+            update.title.strip(),
+            update.content.strip(),
+            utc_now(),
+        )
+
+
+@app.post("/api/linkedin-profile/fetch")
+async def fetch_cached_linkedin_profile(request: LinkedInProfileFetch) -> dict[str, Any]:
+    url = request.url.strip() or config.LINKEDIN_PROFILE_URL
+    if not url:
+        with get_db() as conn:
+            url = str(_linkedin_profile(conn).get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Provide Geoff's LinkedIn profile URL first.")
+    try:
+        snapshot = await fetch_linkedin_profile(url)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    with get_db() as conn:
+        return _upsert_linkedin_profile(
+            conn,
+            snapshot.url,
+            snapshot.title,
+            snapshot.content,
+            utc_now(),
+        )
 
 
 @app.get("/api/jobs")
@@ -659,8 +770,8 @@ def recover_job(job_id: int) -> dict[str, Any]:
 def analyze(job_id: int) -> dict[str, Any]:
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile = _profile(conn)
-        result = analyze_job(job, profile["content"])
+        profile, profile_text = _profile_context(conn)
+        result = analyze_job(job, profile_text)
         payload = result.model_dump()
         conn.execute(
             """
@@ -690,7 +801,7 @@ def analyze(job_id: int) -> dict[str, Any]:
         )
         log_event(conn, job_id, "analyzed", f"{payload['match_score']}% {payload['recommendation']}")
         updated_job = _get_job(conn, job_id)
-        package = generate_application_package(updated_job, profile["content"], payload)
+        package = generate_application_package(updated_job, profile_text, payload)
         resume_id = _insert_artifact(
             conn,
             job_id,
@@ -724,8 +835,8 @@ def analyze(job_id: int) -> dict[str, Any]:
 def generate_package(job_id: int) -> dict[str, Any]:
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile = _profile(conn)
-        package = generate_application_package(job, profile["content"], job.get("analysis_json") if isinstance(job.get("analysis_json"), dict) else None)
+        profile, profile_text = _profile_context(conn)
+        package = generate_application_package(job, profile_text, job.get("analysis_json") if isinstance(job.get("analysis_json"), dict) else None)
         resume_id = _insert_artifact(
             conn,
             job_id,
@@ -756,7 +867,7 @@ def generate_supplemental(job_id: int, request: SupplementalRequest) -> dict[str
         raise HTTPException(status_code=400, detail="Paste at least one supplemental question.")
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile = _profile(conn)
+        profile, profile_text = _profile_context(conn)
         artifacts = rows_to_dicts(
             conn.execute(
                 """
@@ -769,7 +880,7 @@ def generate_supplemental(job_id: int, request: SupplementalRequest) -> dict[str
                 (job_id,),
             ).fetchall()
         )
-        answers = answer_supplemental_questions(job, profile["content"], request.questions_text, artifacts)
+        answers = answer_supplemental_questions(job, profile_text, request.questions_text, artifacts)
         artifact_id = _insert_artifact(
             conn,
             job_id,

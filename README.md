@@ -2,7 +2,7 @@
 
 JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `2.2.0`
+Current version: `2.3.0`
 
 ## v2.0 Scope
 
@@ -71,6 +71,13 @@ Current version: `2.2.0`
 - Bulk status updates for selected active or archived jobs.
 - `Analyze` now also generates a tailored resume and cover-letter artifact.
 - Manual application package actions are labeled as regenerate actions because each run creates a new artifact version.
+
+## v2.3 Scope
+
+- LinkedIn job URL imports use a local, visible, persistent browser profile.
+- LinkedIn URLs automatically switch the import method to `LinkedIn` in the UI.
+- Geoff's LinkedIn profile can be cached from a profile URL or saved from pasted profile text.
+- Cached LinkedIn profile content is appended to the candidate context for job analysis, application package generation, and supplemental answers.
 
 ## Setup
 
@@ -168,6 +175,15 @@ JESSA_PROFILE_SOURCE=jessa_gpt_instructions.txt
 JESSA_RESUME_DIR=~/Documents/job_hunting
 ```
 
+LinkedIn support:
+
+```bash
+JESSA_LINKEDIN_PROFILE_URL=https://www.linkedin.com/in/...
+JESSA_LINKEDIN_BROWSER_PROFILE_DIR=data/linkedin-browser
+JESSA_LINKEDIN_PAGE_SETTLE_MS=7000
+JESSA_LINKEDIN_LOGIN_WAIT_MS=45000
+```
+
 Legacy SQLite import path:
 
 ```bash
@@ -217,7 +233,7 @@ Google Workspace notes:
 
 ### Jobs
 
-Paste a job URL and click `Import`. If a page is heavily dynamic, choose `Rendered`; this uses a visible Playwright Chromium session. If URL import fails, paste the job text and use `Import Text`.
+Paste a job URL and click `Import`. LinkedIn URLs automatically select the `LinkedIn` import mode, which opens a visible browser using the local `data/linkedin-browser` profile so sign-in state can be reused. If a non-LinkedIn page is heavily dynamic, choose `Rendered`; this uses a visible Playwright Chromium session. If URL import fails, paste the job text and use `Import Text`.
 
 Select a job on the left, review/edit fields, then click `Analyze`. JESSA updates the match metrics, salary target, resume base, resume notes, and cover letter, then creates tailored resume and cover-letter artifacts automatically.
 
@@ -230,6 +246,8 @@ Paste application questions into `Supplemental Questions` and click `Generate An
 ### Core Profile
 
 The core profile is the source of truth for future scoring and resume generation. Fix dates, titles, canonical bullets, and career rules here first. Every save increments the profile version.
+
+The LinkedIn Profile cache in this tab stores Geoff's current LinkedIn profile text separately from the canonical core profile. Use `Cache from URL` after signing into the LinkedIn browser profile, or paste profile text and use `Save Cache`. JESSA includes this cached profile as supporting context during job analysis and document generation.
 
 Resume-source rule: the Director and DevSecOps resumes are the preferred current version of the career history. The unabridged resume is retained for older detail and context, not as the primary canonical source when there is a conflict.
 
@@ -251,6 +269,8 @@ Generated resumes, cover letters, and supplemental answers are stored in `applic
 
 Job lifecycle state is stored on `jobs`. The app adds `lifecycle_state`, `archived_at`, `trashed_at`, `purge_after`, and `previous_lifecycle_state` on startup when needed. Trash Bin rows keep their related events and artifacts until the 24-hour purge deletes the job; `ON DELETE CASCADE` removes dependent job events and application artifacts at purge time.
 
+The LinkedIn profile cache is stored in `linkedin_profile_cache`. The browser sign-in cache is local-only under `data/linkedin-browser` by default and should not be committed.
+
 ## Versioning
 
 This project uses semantic versioning.
@@ -269,6 +289,12 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 2.3.0
+
+- Added LinkedIn job import mode backed by a persistent local browser profile.
+- Added LinkedIn profile cache endpoints and Core Profile UI controls.
+- Added cached LinkedIn profile context to analysis, package generation, and supplemental answer prompts.
 
 ### 2.2.0
 

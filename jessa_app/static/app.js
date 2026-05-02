@@ -208,6 +208,22 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+function isLinkedInUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === "linkedin.com" || host.endsWith(".linkedin.com");
+  } catch {
+    return false;
+  }
+}
+
+function syncImportMethodForUrl() {
+  const method = $("#import-method");
+  if (isLinkedInUrl($("#job-url").value) && method.value === "http") {
+    method.value = "linkedin";
+  }
+}
+
 async function loadJobs() {
   updateJobViewTabs();
   const params = new URLSearchParams({ view: state.jobView });
@@ -634,6 +650,16 @@ async function loadProfile() {
   $("#profile-version").textContent = `version ${profile.version} · ${profile.updated_at}`;
 }
 
+async function loadLinkedInProfile() {
+  const profile = await api("/api/linkedin-profile");
+  $("#linkedin-profile-url").value = profile.url || "";
+  $("#linkedin-profile-title").value = profile.title || "";
+  $("#linkedin-profile-cache").value = profile.content || "";
+  $("#linkedin-profile-status").textContent = profile.content
+    ? `cached ${profile.fetched_at || profile.updated_at || ""}`
+    : "not cached";
+}
+
 async function saveProfile() {
   const profile = await api("/api/profile", {
     method: "PUT",
@@ -641,6 +667,33 @@ async function saveProfile() {
   });
   $("#profile-version").textContent = `version ${profile.version} · ${profile.updated_at}`;
   toast("Core profile saved.");
+}
+
+async function saveLinkedInProfile() {
+  const profile = await api("/api/linkedin-profile", {
+    method: "PUT",
+    body: JSON.stringify({
+      url: $("#linkedin-profile-url").value,
+      title: $("#linkedin-profile-title").value,
+      content: $("#linkedin-profile-cache").value,
+    }),
+  });
+  $("#linkedin-profile-status").textContent = `cached ${profile.fetched_at || profile.updated_at || ""}`;
+  toast("LinkedIn profile cache saved.");
+}
+
+async function fetchLinkedInProfileCache() {
+  $("#linkedin-profile-status").textContent = "caching...";
+  toast("Opening LinkedIn profile cache browser...");
+  const profile = await api("/api/linkedin-profile/fetch", {
+    method: "POST",
+    body: JSON.stringify({ url: $("#linkedin-profile-url").value }),
+  });
+  $("#linkedin-profile-url").value = profile.url || "";
+  $("#linkedin-profile-title").value = profile.title || "";
+  $("#linkedin-profile-cache").value = profile.content || "";
+  $("#linkedin-profile-status").textContent = `cached ${profile.fetched_at || profile.updated_at || ""}`;
+  toast("LinkedIn profile cached.");
 }
 
 async function loadEmails() {
@@ -687,7 +740,10 @@ function setupTabs() {
       document.querySelectorAll(".view").forEach((node) => node.classList.remove("active"));
       tab.classList.add("active");
       $(`#${tab.dataset.tab}-view`).classList.add("active");
-      if (tab.dataset.tab === "profile") await loadProfile();
+      if (tab.dataset.tab === "profile") {
+        await loadProfile();
+        await loadLinkedInProfile();
+      }
       if (tab.dataset.tab === "email") await loadEmails();
     });
   });
@@ -704,6 +760,8 @@ function setupActions() {
     setEmptyDetail();
     await loadJobs();
   });
+  $("#job-url").addEventListener("input", syncImportMethodForUrl);
+  $("#job-url").addEventListener("change", syncImportMethodForUrl);
   $("#select-visible-jobs").addEventListener("click", () => {
     state.jobs.forEach((job) => state.selectedJobIds.add(job.id));
     renderJobs();
@@ -722,6 +780,11 @@ function setupActions() {
   $("#import-url").addEventListener("click", () => importJob(false).catch((error) => toast(error.message)));
   $("#import-text").addEventListener("click", () => importJob(true).catch((error) => toast(error.message)));
   $("#save-profile").addEventListener("click", () => saveProfile().catch((error) => toast(error.message)));
+  $("#save-linkedin-profile").addEventListener("click", () => saveLinkedInProfile().catch((error) => toast(error.message)));
+  $("#fetch-linkedin-profile").addEventListener("click", () => fetchLinkedInProfileCache().catch((error) => {
+    $("#linkedin-profile-status").textContent = "cache failed";
+    toast(error.message);
+  }));
   $("#sync-email").addEventListener("click", () => syncEmail().catch((error) => {
     $("#email-status").textContent = "Sync failed";
     toast(error.message);

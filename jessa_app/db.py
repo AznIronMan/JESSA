@@ -258,6 +258,16 @@ SCHEMA_STATEMENTS = (
         updated_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS linkedin_profile_cache (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        url TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        fetched_at TEXT,
+        updated_at TEXT NOT NULL
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_job_events_job_id ON job_events(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_emails_job_id ON emails(job_id)",
     "CREATE INDEX IF NOT EXISTS idx_application_artifacts_job_id ON application_artifacts(job_id)",
