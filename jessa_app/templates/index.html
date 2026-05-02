@@ -40,6 +40,27 @@
             <button class="job-view-tab" data-job-view="archived">ARCHIVED</button>
             <button class="job-view-tab" data-job-view="trash">TRASH BIN</button>
           </div>
+          <div class="job-list-tools">
+            <label class="status-filter" id="status-filter-shell">
+              <span>Status</span>
+              <select id="job-status-filter"></select>
+            </label>
+            <div class="bulk-actions" id="bulk-actions">
+              <div class="bulk-count" id="bulk-count">0 selected</div>
+              <div class="bulk-row">
+                <button id="select-visible-jobs">Select Visible</button>
+                <button id="clear-selected-jobs">Clear</button>
+              </div>
+              <div class="bulk-row" id="bulk-status-row">
+                <select id="bulk-status"></select>
+                <button id="bulk-update-status">Update Status</button>
+              </div>
+              <div class="bulk-row">
+                <button id="bulk-trash" class="danger">Move to Trash</button>
+                <button id="bulk-recover" class="hidden">Recover</button>
+              </div>
+            </div>
+          </div>
           <div class="job-list" id="job-list"></div>
         </aside>
         <section class="job-detail" id="job-detail">

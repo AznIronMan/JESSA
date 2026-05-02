@@ -2,7 +2,7 @@
 
 JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `2.1.0`
+Current version: `2.2.0`
 
 ## v2.0 Scope
 
@@ -62,6 +62,15 @@ Current version: `2.1.0`
   - job expired
   - rejected
 - Restore archived jobs back to the active list.
+
+## v2.2 Scope
+
+- Status filtering for the active jobs list.
+- Checked-row multi-select in the jobs list.
+- Bulk move selected jobs to the Trash Bin.
+- Bulk status updates for selected active or archived jobs.
+- `Analyze` now also generates a tailored resume and cover-letter artifact.
+- Manual application package actions are labeled as regenerate actions because each run creates a new artifact version.
 
 ## Setup
 
@@ -210,11 +219,11 @@ Google Workspace notes:
 
 Paste a job URL and click `Import`. If a page is heavily dynamic, choose `Rendered`; this uses a visible Playwright Chromium session. If URL import fails, paste the job text and use `Import Text`.
 
-Select a job on the left, review/edit fields, then click `Analyze`. JESSA updates the match metrics, salary target, resume base, resume notes, and cover letter.
+Select a job on the left, review/edit fields, then click `Analyze`. JESSA updates the match metrics, salary target, resume base, resume notes, and cover letter, then creates tailored resume and cover-letter artifacts automatically.
 
-Use the left-rail lifecycle buttons to switch between active jobs, archived jobs, and the Trash Bin. Click `Trash` on a job row or in the detail header to move a job to the Trash Bin. Trashed jobs can be recovered for 24 hours; after that, JESSA purges them automatically the next time the app starts or loads a jobs view. Jobs marked `Not For Me`, `Job Expired`, or `Rejected` are moved to Archived automatically.
+Use the left-rail lifecycle buttons to switch between active jobs, archived jobs, and the Trash Bin. In Active, use the status filter above the job list to narrow the title list. Use the row checkboxes to select multiple jobs, then bulk-update their status or move them to the Trash Bin. Click `Trash` on a job row or in the detail header to move one job to the Trash Bin. Trashed jobs can be recovered for 24 hours; after that, JESSA purges them automatically the next time the app starts or loads a jobs view. Jobs marked `Not For Me`, `Job Expired`, or `Rejected` are moved to Archived automatically.
 
-Click `Generate Docs` to create a tailored resume and cover letter. These are stored in the Application Materials section as versioned artifacts. Edit the text if needed, click `Save`, then use `PDF` to download. After you submit a document to an employer, click `Mark Submitted` so JESSA records what went out and when.
+Click `Regenerate Docs` to create another tailored resume and cover-letter version. These are stored in the Application Materials section as versioned artifacts. Edit the text if needed, click `Save`, then use `PDF` to download. After you submit a document to an employer, click `Mark Submitted` so JESSA records what went out and when.
 
 Paste application questions into `Supplemental Questions` and click `Generate Answers`. The generated answers are saved as another artifact, with the same save, PDF, and submitted tracking.
 
@@ -260,6 +269,19 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 2.2.0
+
+- Added active-list status filtering.
+- Added checked-row bulk selection with bulk trash and bulk status updates.
+- Changed Analyze to generate tailored resume and cover-letter artifacts automatically.
+- Renamed manual package generation actions to regenerate actions.
+
+### 2.1.0
+
+- Added Active, Archived, and Trash Bin job lifecycle views.
+- Added 24-hour trash recovery and purge behavior.
+- Added auto-archive for `not_for_me`, `job_expired`, and `rejected`.
 
 ### 2.0.0
 

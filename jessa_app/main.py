@@ -86,6 +86,28 @@ class ArtifactUpdate(BaseModel):
     is_submitted: bool | None = None
 
 
+class BulkJobRequest(BaseModel):
+    job_ids: list[int]
+
+
+class BulkStatusUpdate(BulkJobRequest):
+    status: str
+
+
+JOB_STATUS_VALUES = {
+    "new",
+    "not_applied",
+    "tailor",
+    "ready",
+    "applied",
+    "follow-up",
+    "interview",
+    "on_hold",
+    "job_expired",
+    "not_for_me",
+    "rejected",
+}
+
 JOB_LIST_VIEWS = {
     JOB_LIFECYCLE_ACTIVE,
     JOB_LIFECYCLE_ARCHIVED,
@@ -122,6 +144,19 @@ def _parse_utc(value: str | None) -> datetime | None:
 
 def _auto_archive_status(status: str | None) -> bool:
     return str(status or "").strip() in AUTO_ARCHIVE_STATUSES
+
+
+def _normalize_job_ids(job_ids: list[int]) -> list[int]:
+    normalized = sorted({int(job_id) for job_id in job_ids if int(job_id) > 0})
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Select at least one job.")
+    if len(normalized) > 250:
+        raise HTTPException(status_code=400, detail="Bulk actions are limited to 250 jobs at a time.")
+    return normalized
+
+
+def _where_ids(ids: list[int]) -> tuple[str, list[int]]:
+    return ", ".join("?" for _ in ids), ids
 
 
 def _profile(conn) -> dict[str, Any]:
@@ -322,20 +357,27 @@ def update_profile(update: ProfileUpdate) -> dict[str, Any]:
 
 
 @app.get("/api/jobs")
-def list_jobs(view: str = JOB_LIFECYCLE_ACTIVE) -> list[dict[str, Any]]:
+def list_jobs(view: str = JOB_LIFECYCLE_ACTIVE, status: str = "") -> list[dict[str, Any]]:
     view = view.strip().lower()
     if view not in JOB_LIST_VIEWS:
         raise HTTPException(status_code=400, detail="Unknown jobs view.")
-    where_clause = ""
-    params: tuple[Any, ...] = ()
+    status = status.strip()
+    conditions = []
+    params: list[Any] = []
     order_clause = "updated_at DESC, id DESC"
     if view in {JOB_LIFECYCLE_ACTIVE, JOB_LIFECYCLE_ARCHIVED, JOB_LIFECYCLE_TRASH}:
-        where_clause = "WHERE lifecycle_state = ?"
-        params = (view,)
+        conditions.append("lifecycle_state = ?")
+        params.append(view)
+    if status and status != "all":
+        if status not in JOB_STATUS_VALUES:
+            raise HTTPException(status_code=400, detail="Unknown job status.")
+        conditions.append("status = ?")
+        params.append(status)
     if view == JOB_LIFECYCLE_ARCHIVED:
         order_clause = "archived_at DESC NULLS LAST, updated_at DESC, id DESC"
     elif view == JOB_LIFECYCLE_TRASH:
         order_clause = "trashed_at DESC NULLS LAST, updated_at DESC, id DESC"
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     with get_db() as conn:
         purge_expired_trashed_jobs(conn)
         rows = conn.execute(
@@ -373,6 +415,95 @@ async def import_job(request: ImportRequest) -> dict[str, Any]:
     with get_db() as conn:
         job_id = _insert_or_update_job(conn, imported)
         return _get_job(conn, job_id)
+
+
+@app.post("/api/jobs/bulk/trash")
+def bulk_trash_jobs(request: BulkJobRequest) -> dict[str, Any]:
+    ids = _normalize_job_ids(request.job_ids)
+    placeholders, values = _where_ids(ids)
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT id, lifecycle_state FROM jobs WHERE id IN ({placeholders}) ORDER BY id",
+            values,
+        ).fetchall()
+        now, purge_after = _trash_window()
+        updated = 0
+        skipped = 0
+        for row in rows:
+            job_id = int(row["id"])
+            lifecycle_state = row.get("lifecycle_state") or JOB_LIFECYCLE_ACTIVE
+            if lifecycle_state == JOB_LIFECYCLE_TRASH:
+                skipped += 1
+                continue
+            conn.execute(
+                """
+                UPDATE jobs
+                SET lifecycle_state = ?, previous_lifecycle_state = ?, trashed_at = ?,
+                    purge_after = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (JOB_LIFECYCLE_TRASH, lifecycle_state, now, purge_after, now, job_id),
+            )
+            log_event(conn, job_id, "trashed", f"Bulk trash; recoverable until {purge_after}.")
+            updated += 1
+        return {
+            "requested": len(ids),
+            "matched": len(rows),
+            "updated": updated,
+            "skipped": skipped + (len(ids) - len(rows)),
+        }
+
+
+@app.put("/api/jobs/bulk/status")
+def bulk_update_job_status(request: BulkStatusUpdate) -> dict[str, Any]:
+    ids = _normalize_job_ids(request.job_ids)
+    status = request.status.strip()
+    if status not in JOB_STATUS_VALUES:
+        raise HTTPException(status_code=400, detail="Unknown job status.")
+    placeholders, values = _where_ids(ids)
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT id, status, lifecycle_state FROM jobs WHERE id IN ({placeholders}) ORDER BY id",
+            values,
+        ).fetchall()
+        now = utc_now()
+        auto_archive = _auto_archive_status(status)
+        updated = 0
+        archived = 0
+        skipped = len(ids) - len(rows)
+        for row in rows:
+            job_id = int(row["id"])
+            if row.get("lifecycle_state") == JOB_LIFECYCLE_TRASH:
+                skipped += 1
+                continue
+            if auto_archive:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, status_updated_at = ?, updated_at = ?,
+                        lifecycle_state = ?, archived_at = ?,
+                        trashed_at = NULL, purge_after = NULL, previous_lifecycle_state = NULL
+                    WHERE id = ?
+                    """,
+                    (status, now, now, JOB_LIFECYCLE_ARCHIVED, now, job_id),
+                )
+                archived += 1
+            else:
+                conn.execute(
+                    "UPDATE jobs SET status = ?, status_updated_at = ?, updated_at = ? WHERE id = ?",
+                    (status, now, now, job_id),
+                )
+            log_event(conn, job_id, "status", f"{row.get('status', '')} -> {status}")
+            if auto_archive:
+                log_event(conn, job_id, "archived", "Auto archived after bulk terminal status.")
+            updated += 1
+        return {
+            "requested": len(ids),
+            "matched": len(rows),
+            "updated": updated,
+            "archived": archived,
+            "skipped": skipped,
+        }
 
 
 @app.get("/api/jobs/{job_id}")
@@ -528,8 +659,8 @@ def recover_job(job_id: int) -> dict[str, Any]:
 def analyze(job_id: int) -> dict[str, Any]:
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile = _profile(conn)["content"]
-        result = analyze_job(job, profile)
+        profile = _profile(conn)
+        result = analyze_job(job, profile["content"])
         payload = result.model_dump()
         conn.execute(
             """
@@ -558,7 +689,35 @@ def analyze(job_id: int) -> dict[str, Any]:
             ),
         )
         log_event(conn, job_id, "analyzed", f"{payload['match_score']}% {payload['recommendation']}")
-        return _get_job(conn, job_id)
+        updated_job = _get_job(conn, job_id)
+        package = generate_application_package(updated_job, profile["content"], payload)
+        resume_id = _insert_artifact(
+            conn,
+            job_id,
+            "resume",
+            package.resume_title,
+            package.resume_markdown,
+            int(profile["version"]),
+        )
+        cover_id = _insert_artifact(
+            conn,
+            job_id,
+            "cover_letter",
+            package.cover_letter_title,
+            package.cover_letter_markdown,
+            int(profile["version"]),
+        )
+        conn.execute(
+            "UPDATE jobs SET cover_letter = ?, resume_notes = ?, updated_at = ? WHERE id = ?",
+            (
+                package.cover_letter_markdown,
+                package.notes or "Full tailored resume generated in Artifacts.",
+                utc_now(),
+                job_id,
+            ),
+        )
+        log_event(conn, job_id, "package_generated", f"Auto-generated resume artifact #{resume_id}; cover letter artifact #{cover_id}")
+        return _job_details(conn, job_id)
 
 
 @app.post("/api/jobs/{job_id}/generate-package")

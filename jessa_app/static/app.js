@@ -2,9 +2,25 @@ const state = {
   jobs: [],
   selectedJobId: null,
   jobView: "active",
+  jobStatusFilter: "all",
+  selectedJobIds: new Set(),
 };
 
 const $ = (selector) => document.querySelector(selector);
+
+const JOB_STATUSES = [
+  ["new", "New"],
+  ["not_applied", "Not Applied"],
+  ["tailor", "Tailor"],
+  ["ready", "Ready"],
+  ["applied", "Applied"],
+  ["follow-up", "Follow-up"],
+  ["interview", "Interview"],
+  ["on_hold", "On Hold"],
+  ["job_expired", "Job Expired"],
+  ["not_for_me", "Not For Me"],
+  ["rejected", "Rejected"],
+];
 
 function toast(message) {
   const node = $("#toast");
@@ -51,6 +67,15 @@ function updateJobViewTabs() {
   document.querySelectorAll("[data-job-view]").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.jobView === state.jobView);
   });
+  const statusShell = $("#status-filter-shell");
+  if (statusShell) statusShell.classList.toggle("hidden", state.jobView !== "active");
+  const bulkStatusRow = $("#bulk-status-row");
+  if (bulkStatusRow) bulkStatusRow.classList.toggle("hidden", state.jobView === "trash");
+  const bulkTrash = $("#bulk-trash");
+  if (bulkTrash) bulkTrash.classList.toggle("hidden", state.jobView === "trash");
+  const bulkRecover = $("#bulk-recover");
+  if (bulkRecover) bulkRecover.classList.toggle("hidden", state.jobView !== "trash");
+  updateBulkActions();
 }
 
 function formatTimestamp(value) {
@@ -75,10 +100,41 @@ function setEmptyDetail() {
   $("#job-detail").innerHTML = `<div class="empty-state">${escapeHtml(detailEmptyText())}</div>`;
 }
 
+function selectedJobIds() {
+  return Array.from(state.selectedJobIds);
+}
+
+function pruneSelectedJobs() {
+  const visible = new Set(state.jobs.map((job) => job.id));
+  state.selectedJobIds = new Set(selectedJobIds().filter((id) => visible.has(id)));
+}
+
+function updateBulkActions() {
+  const count = state.selectedJobIds.size;
+  const label = count === 1 ? "1 selected" : `${count} selected`;
+  const countNode = $("#bulk-count");
+  if (countNode) countNode.textContent = label;
+  ["#bulk-update-status", "#bulk-trash", "#bulk-recover"].forEach((selector) => {
+    const button = $(selector);
+    if (button) button.disabled = count === 0;
+  });
+}
+
+function renderStatusOptions(select, includeAll = false) {
+  if (!select) return;
+  const options = includeAll
+    ? [["all", "All Statuses"], ...JOB_STATUSES]
+    : JOB_STATUSES;
+  select.innerHTML = options
+    .map(([value, label]) => `<option value="${value}">${escapeHtml(label)}</option>`)
+    .join("");
+}
+
 function renderJobs() {
   const list = $("#job-list");
   if (!state.jobs.length) {
     list.innerHTML = `<div class="empty-state">No ${escapeHtml(jobViewLabel())}.</div>`;
+    updateBulkActions();
     return;
   }
   list.innerHTML = state.jobs
@@ -93,8 +149,12 @@ function renderJobs() {
       const purgeMeta = lifecycle === "trash" && job.purge_after
         ? `<div class="job-subtitle">Purges ${escapeHtml(formatTimestamp(job.purge_after))}</div>`
         : "";
+      const checked = state.selectedJobIds.has(job.id) ? "checked" : "";
       return `
         <article class="job-item ${active}" data-job-id="${job.id}">
+          <label class="job-check" aria-label="Select job">
+            <input type="checkbox" data-check-job="${job.id}" ${checked}>
+          </label>
           <button class="job-select" data-select-job="${job.id}">
             <div class="job-title">${escapeHtml(job.title || "Untitled job")}</div>
             <div class="job-subtitle">${escapeHtml([job.company, job.location].filter(Boolean).join(" · "))}</div>
@@ -114,6 +174,17 @@ function renderJobs() {
   list.querySelectorAll("[data-select-job]").forEach((item) => {
     item.addEventListener("click", () => selectJob(Number(item.dataset.selectJob)));
   });
+  list.querySelectorAll("[data-check-job]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const id = Number(checkbox.dataset.checkJob);
+      if (checkbox.checked) {
+        state.selectedJobIds.add(id);
+      } else {
+        state.selectedJobIds.delete(id);
+      }
+      updateBulkActions();
+    });
+  });
   list.querySelectorAll("[data-trash-job]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -126,6 +197,7 @@ function renderJobs() {
       recoverJob(Number(button.dataset.recoverJob)).catch((error) => toast(error.message));
     });
   });
+  updateBulkActions();
 }
 
 function escapeHtml(value) {
@@ -138,7 +210,12 @@ function escapeHtml(value) {
 
 async function loadJobs() {
   updateJobViewTabs();
-  state.jobs = await api(`/api/jobs?view=${encodeURIComponent(state.jobView)}`);
+  const params = new URLSearchParams({ view: state.jobView });
+  if (state.jobView === "active" && state.jobStatusFilter !== "all") {
+    params.set("status", state.jobStatusFilter);
+  }
+  state.jobs = await api(`/api/jobs?${params.toString()}`);
+  pruneSelectedJobs();
   if (state.selectedJobId && !state.jobs.some((job) => job.id === state.selectedJobId)) {
     state.selectedJobId = null;
     setEmptyDetail();
@@ -172,7 +249,7 @@ function renderJobDetail(job) {
     : `
         ${urlButton}
         <button id="analyze-job" class="primary">Analyze</button>
-        <button id="generate-package">Generate Docs</button>
+        <button id="generate-package">Regenerate Docs</button>
         <button id="save-job">Save</button>
       `;
   const lifecycleActions = lifecycle === "trash"
@@ -185,24 +262,11 @@ function renderJobDetail(job) {
     : lifecycle === "archived"
       ? `<div class="lifecycle-notice">Archived · ${escapeHtml(formatTimestamp(job.archived_at) || "terminal status")}</div>`
       : "";
-  const generateMaterialsButton = locked ? "" : `<button id="generate-package-inline">Generate Resume + Cover Letter</button>`;
+  const generateMaterialsButton = locked ? "" : `<button id="generate-package-inline">Regenerate Resume + Cover Letter</button>`;
   const generateSupplementalButton = locked ? "" : `<button id="generate-supplemental">Generate Answers</button>`;
   const supplementalPlaceholder = locked ? "" : "Paste supplemental/application questions here. The generated answers will be saved as an artifact and can be marked submitted.";
   const artifactActionsDisabled = locked ? "disabled" : "";
   const artifactContentLocked = locked ? "readonly" : "";
-  const statuses = [
-    ["new", "New"],
-    ["not_applied", "Not Applied"],
-    ["tailor", "Tailor"],
-    ["ready", "Ready"],
-    ["applied", "Applied"],
-    ["follow-up", "Follow-up"],
-    ["interview", "Interview"],
-    ["on_hold", "On Hold"],
-    ["job_expired", "Job Expired"],
-    ["not_for_me", "Not For Me"],
-    ["rejected", "Rejected"],
-  ];
   $("#job-detail").innerHTML = `
     <div class="detail-header">
       <div>
@@ -230,7 +294,7 @@ function renderJobDetail(job) {
       <label>Salary <input id="edit-salary" value="${escapeHtml(job.salary)}" ${formDisabled}></label>
       <label>Status
         <select id="edit-status" ${formDisabled}>
-          ${statuses.map(([value, label]) => (
+          ${JOB_STATUSES.map(([value, label]) => (
             `<option value="${value}" ${job.status === value ? "selected" : ""}>${label}</option>`
           )).join("")}
         </select>
@@ -388,6 +452,7 @@ function renderEvents(events) {
 async function switchJobView(view) {
   state.jobView = view;
   state.selectedJobId = null;
+  state.selectedJobIds.clear();
   updateJobViewTabs();
   setEmptyDetail();
   await loadJobs();
@@ -415,6 +480,7 @@ async function trashJob(id) {
   const job = await api(`/api/jobs/${id}`, { method: "DELETE" });
   state.jobView = "trash";
   state.selectedJobId = job.id;
+  state.selectedJobIds.delete(id);
   await loadJobs();
   renderJobDetail(job);
   toast("Moved to Trash Bin.");
@@ -424,9 +490,56 @@ async function recoverJob(id) {
   const job = await api(`/api/jobs/${id}/recover`, { method: "POST" });
   state.jobView = job.lifecycle_state || "active";
   state.selectedJobId = job.id;
+  state.selectedJobIds.delete(id);
   await loadJobs();
   renderJobDetail(job);
   toast("Job recovered.");
+}
+
+async function bulkTrashSelectedJobs() {
+  const ids = selectedJobIds();
+  if (!ids.length) return;
+  const result = await api("/api/jobs/bulk/trash", {
+    method: "POST",
+    body: JSON.stringify({ job_ids: ids }),
+  });
+  state.selectedJobIds.clear();
+  state.selectedJobId = null;
+  await loadJobs();
+  setEmptyDetail();
+  toast(`Moved ${result.updated} job${result.updated === 1 ? "" : "s"} to Trash Bin.`);
+}
+
+async function bulkUpdateSelectedStatus() {
+  const ids = selectedJobIds();
+  if (!ids.length) return;
+  const status = $("#bulk-status").value;
+  const result = await api("/api/jobs/bulk/status", {
+    method: "PUT",
+    body: JSON.stringify({ job_ids: ids, status }),
+  });
+  state.selectedJobIds.clear();
+  state.selectedJobId = null;
+  if (result.archived) state.jobView = "archived";
+  await loadJobs();
+  setEmptyDetail();
+  toast(`Updated ${result.updated} job${result.updated === 1 ? "" : "s"}.`);
+}
+
+async function bulkRecoverSelectedJobs() {
+  const ids = selectedJobIds();
+  if (!ids.length) return;
+  let recovered = 0;
+  for (const id of ids) {
+    await api(`/api/jobs/${id}/recover`, { method: "POST" });
+    recovered += 1;
+  }
+  state.selectedJobIds.clear();
+  state.selectedJobId = null;
+  state.jobView = "active";
+  await loadJobs();
+  setEmptyDetail();
+  toast(`Recovered ${recovered} job${recovered === 1 ? "" : "s"}.`);
 }
 
 async function importJob(useText) {
@@ -445,20 +558,20 @@ async function importJob(useText) {
 
 async function analyzeSelectedJob() {
   if (!state.selectedJobId) return;
-  toast("Analyzing job...");
+  toast("Analyzing and generating materials...");
   const job = await api(`/api/jobs/${state.selectedJobId}/analyze`, { method: "POST" });
   await loadJobs();
   renderJobDetail(job);
-  toast("Analysis complete.");
+  toast("Analysis and materials complete.");
 }
 
 async function generatePackage() {
   if (!state.selectedJobId) return;
-  toast("Generating resume and cover letter...");
+  toast("Regenerating resume and cover letter...");
   const job = await api(`/api/jobs/${state.selectedJobId}/generate-package`, { method: "POST" });
   await loadJobs();
   renderJobDetail(job);
-  toast("Application materials generated.");
+  toast("Application materials regenerated.");
 }
 
 async function generateSupplemental() {
@@ -581,6 +694,27 @@ function setupTabs() {
 }
 
 function setupActions() {
+  renderStatusOptions($("#job-status-filter"), true);
+  renderStatusOptions($("#bulk-status"));
+  $("#job-status-filter").value = state.jobStatusFilter;
+  $("#job-status-filter").addEventListener("change", async () => {
+    state.jobStatusFilter = $("#job-status-filter").value;
+    state.selectedJobId = null;
+    state.selectedJobIds.clear();
+    setEmptyDetail();
+    await loadJobs();
+  });
+  $("#select-visible-jobs").addEventListener("click", () => {
+    state.jobs.forEach((job) => state.selectedJobIds.add(job.id));
+    renderJobs();
+  });
+  $("#clear-selected-jobs").addEventListener("click", () => {
+    state.selectedJobIds.clear();
+    renderJobs();
+  });
+  $("#bulk-trash").addEventListener("click", () => bulkTrashSelectedJobs().catch((error) => toast(error.message)));
+  $("#bulk-update-status").addEventListener("click", () => bulkUpdateSelectedStatus().catch((error) => toast(error.message)));
+  $("#bulk-recover").addEventListener("click", () => bulkRecoverSelectedJobs().catch((error) => toast(error.message)));
   document.querySelectorAll("[data-job-view]").forEach((tab) => {
     tab.addEventListener("click", () => switchJobView(tab.dataset.jobView).catch((error) => toast(error.message)));
   });

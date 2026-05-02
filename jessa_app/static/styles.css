@@ -167,6 +167,51 @@ textarea {
   color: #fff;
 }
 
+.job-list-tools {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+
+.status-filter {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-filter select,
+.bulk-actions select {
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.bulk-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.bulk-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bulk-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.bulk-row button {
+  min-width: 0;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
 .job-list {
   overflow: auto;
   min-height: 0;
@@ -177,11 +222,22 @@ textarea {
   width: 100%;
   border-bottom: 1px solid var(--line);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: start;
   padding: 0 10px 0 0;
   background: transparent;
+}
+
+.job-check {
+  display: grid;
+  place-items: center;
+  min-height: 96px;
+}
+
+.job-check input {
+  width: 16px;
+  height: 16px;
 }
 
 .job-select {
