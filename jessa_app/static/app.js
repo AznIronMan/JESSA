@@ -145,7 +145,7 @@ function renderJobs() {
       const lifecycleBadge = lifecycle === "active" ? "" : `<span class="badge">${escapeHtml(lifecycle === "trash" ? "trash" : lifecycle)}</span>`;
       const rowAction = lifecycle === "trash"
         ? `<button class="job-row-action" data-recover-job="${job.id}">Recover</button>`
-        : `<button class="job-row-action danger" data-trash-job="${job.id}">Trash</button>`;
+        : "";
       const purgeMeta = lifecycle === "trash" && job.purge_after
         ? `<div class="job-subtitle">Purges ${escapeHtml(formatTimestamp(job.purge_after))}</div>`
         : "";
@@ -183,12 +183,6 @@ function renderJobs() {
         state.selectedJobIds.delete(id);
       }
       updateBulkActions();
-    });
-  });
-  list.querySelectorAll("[data-trash-job]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      trashJob(Number(button.dataset.trashJob)).catch((error) => toast(error.message));
     });
   });
   list.querySelectorAll("[data-recover-job]").forEach((button) => {

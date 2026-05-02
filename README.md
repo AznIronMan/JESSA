@@ -2,7 +2,7 @@
 
 JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `2.3.2`
+Current version: `2.3.3`
 
 ## v2.0 Scope
 
@@ -241,7 +241,7 @@ Paste a job URL and click `Import`. LinkedIn URLs automatically select the `Link
 
 Select a job on the left, review/edit fields, then click `Analyze`. JESSA updates the match metrics, salary target, resume base, resume notes, and cover letter, then creates tailored resume and cover-letter artifacts automatically.
 
-Use the left-rail lifecycle buttons to switch between active jobs, archived jobs, and the Trash Bin. In Active, use the status filter above the job list to narrow the title list. Use the row checkboxes to select multiple jobs, then bulk-update their status or move them to the Trash Bin. Click `Trash` on a job row or in the detail header to move one job to the Trash Bin. Trashed jobs can be recovered for 24 hours; after that, JESSA purges them automatically the next time the app starts or loads a jobs view. Jobs marked `Not For Me`, `Job Expired`, or `Rejected` are moved to Archived automatically.
+Use the left-rail lifecycle buttons to switch between active jobs, archived jobs, and the Trash Bin. In Active, use the status filter above the job list to narrow the title list. Use the row checkboxes to select one or more jobs, then bulk-update their status or move them to the Trash Bin. The detail header still supports moving the open job to Trash. Trashed jobs can be recovered for 24 hours; after that, JESSA purges them automatically the next time the app starts or loads a jobs view. Jobs marked `Not For Me`, `Job Expired`, or `Rejected` are moved to Archived automatically.
 
 Click `Regenerate Docs` to create another tailored resume and cover-letter version. These are stored in the Application Materials section as versioned artifacts. Edit the text if needed, click `Save`, then use `PDF` to download. After you submit a document to an employer, click `Mark Submitted` so JESSA records what went out and when.
 
@@ -293,6 +293,10 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 2.3.3
+
+- Removed the per-row Trash button from the jobs list so list deletion flows through checkbox selection and the bulk Trash action.
 
 ### 2.3.2
 
