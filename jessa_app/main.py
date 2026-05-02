@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -25,6 +25,20 @@ templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 app = FastAPI(title="JESSA", version=__version__)
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
+
+
+@app.middleware("http")
+async def restrict_clients(request: Request, call_next):
+    client_host = request.client.host if request.client else None
+    if not config.client_host_allowed(client_host):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "Client address is not allowed.",
+                "allowed_networks": config.allowed_client_networks(),
+            },
+        )
+    return await call_next(request)
 
 
 class ImportRequest(BaseModel):
@@ -222,6 +236,7 @@ def health() -> dict[str, Any]:
         "email_configured": bool(config.EMAIL_USER and config.EMAIL_PASSWORD),
         "email_imap_host": config.EMAIL_IMAP_HOST,
         "email_smtp_host": config.EMAIL_SMTP_HOST,
+        "allowed_client_networks": config.allowed_client_networks(),
         "playwright_browser_path": config.PLAYWRIGHT_BROWSER_PATH,
     }
 

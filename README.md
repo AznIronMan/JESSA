@@ -2,7 +2,7 @@
 
 JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in SQLite, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `1.1.1`
+Current version: `1.1.2`
 
 ## v1.1 Scope
 
@@ -82,7 +82,7 @@ Initialize and run:
 
 ```bash
 source .venv/bin/activate
-uvicorn jessa_app.main:app --reload --host 127.0.0.1 --port 8765
+uvicorn jessa_app.main:app --reload --host 0.0.0.0 --port 8765
 ```
 
 Or use the project launcher:
@@ -101,7 +101,10 @@ Open:
 
 ```text
 http://127.0.0.1:8765
+http://<this-mac-10.0.x.x-ip>:8765
 ```
+
+The launcher binds to `0.0.0.0` by default so other `10.0.x.x` devices can reach it. The app still rejects clients outside the configured allowed networks.
 
 ## Environment
 
@@ -134,6 +137,14 @@ JESSA_DB_PATH=data/jessa.sqlite3
 JESSA_PROFILE_SOURCE=jessa_gpt_instructions.txt
 JESSA_RESUME_DIR=~/Documents/job_hunting
 ```
+
+LAN access defaults:
+
+```bash
+JESSA_ALLOWED_CLIENT_NETWORKS=127.0.0.0/8,::1/128,10.0.0.0/8
+```
+
+Use `./stop_jessa.sh` to stop a running JESSA web app process started from this project.
 
 Google Workspace notes:
 
@@ -192,6 +203,12 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 1.1.2
+
+- Changed the launcher default bind host to `0.0.0.0` for LAN access.
+- Added app-level client network filtering for localhost and `10.0.0.0/8` by default.
+- Added `stop_jessa.sh` to find and stop the running JESSA web app process.
 
 ### 1.1.1
 
