@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,20 @@ from pydantic import BaseModel
 from starlette.requests import Request
 
 from . import __version__, config
-from .db import get_db, init_db, log_event, row_to_dict, rows_to_dicts, utc_now
+from .db import (
+    AUTO_ARCHIVE_STATUSES,
+    JOB_LIFECYCLE_ACTIVE,
+    JOB_LIFECYCLE_ARCHIVED,
+    JOB_LIFECYCLE_TRASH,
+    TRASH_RETENTION_HOURS,
+    get_db,
+    init_db,
+    log_event,
+    purge_expired_trashed_jobs,
+    row_to_dict,
+    rows_to_dicts,
+    utc_now,
+)
 from .services.email_client import sync_inbox, test_smtp
 from .services.importer import ImportedJob, import_from_text, import_from_url
 from .services.llm import analyze_job, answer_supplemental_questions, generate_application_package
@@ -72,6 +86,44 @@ class ArtifactUpdate(BaseModel):
     is_submitted: bool | None = None
 
 
+JOB_LIST_VIEWS = {
+    JOB_LIFECYCLE_ACTIVE,
+    JOB_LIFECYCLE_ARCHIVED,
+    JOB_LIFECYCLE_TRASH,
+    "all",
+}
+
+
+def _utc_datetime() -> datetime:
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _utc_stamp(value: datetime) -> str:
+    return value.isoformat(timespec="seconds")
+
+
+def _trash_window() -> tuple[str, str]:
+    now = _utc_datetime()
+    return _utc_stamp(now), _utc_stamp(now + timedelta(hours=TRASH_RETENTION_HOURS))
+
+
+def _parse_utc(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _auto_archive_status(status: str | None) -> bool:
+    return str(status or "").strip() in AUTO_ARCHIVE_STATUSES
+
+
 def _profile(conn) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM core_profile WHERE id = 1").fetchone()
     item = row_to_dict(row)
@@ -81,6 +133,7 @@ def _profile(conn) -> dict[str, Any]:
 
 
 def _get_job(conn, job_id: int) -> dict[str, Any]:
+    purge_expired_trashed_jobs(conn)
     row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     item = row_to_dict(row)
     if not item:
@@ -246,6 +299,7 @@ def health() -> dict[str, Any]:
         "email_smtp_host": config.EMAIL_SMTP_HOST,
         "allowed_client_networks": config.allowed_client_networks(),
         "playwright_browser_path": config.PLAYWRIGHT_BROWSER_PATH,
+        "trash_retention_hours": TRASH_RETENTION_HOURS,
     }
 
 
@@ -268,16 +322,33 @@ def update_profile(update: ProfileUpdate) -> dict[str, Any]:
 
 
 @app.get("/api/jobs")
-def list_jobs() -> list[dict[str, Any]]:
+def list_jobs(view: str = JOB_LIFECYCLE_ACTIVE) -> list[dict[str, Any]]:
+    view = view.strip().lower()
+    if view not in JOB_LIST_VIEWS:
+        raise HTTPException(status_code=400, detail="Unknown jobs view.")
+    where_clause = ""
+    params: tuple[Any, ...] = ()
+    order_clause = "updated_at DESC, id DESC"
+    if view in {JOB_LIFECYCLE_ACTIVE, JOB_LIFECYCLE_ARCHIVED, JOB_LIFECYCLE_TRASH}:
+        where_clause = "WHERE lifecycle_state = ?"
+        params = (view,)
+    if view == JOB_LIFECYCLE_ARCHIVED:
+        order_clause = "archived_at DESC NULLS LAST, updated_at DESC, id DESC"
+    elif view == JOB_LIFECYCLE_TRASH:
+        order_clause = "trashed_at DESC NULLS LAST, updated_at DESC, id DESC"
     with get_db() as conn:
+        purge_expired_trashed_jobs(conn)
         rows = conn.execute(
-            """
+            f"""
             SELECT id, source, title, company, location, salary, status, match_score,
                    qualification_band, interview_odds, salary_ask_range, resume_base,
-                   recommendation, created_at, updated_at
+                   recommendation, lifecycle_state, archived_at, trashed_at, purge_after,
+                   previous_lifecycle_state, created_at, updated_at
             FROM jobs
-            ORDER BY updated_at DESC, id DESC
-            """
+            {where_clause}
+            ORDER BY {order_clause}
+            """,
+            params,
         ).fetchall()
         return rows_to_dicts(rows)
 
@@ -316,25 +387,141 @@ def update_job(job_id: int, update: JobUpdate) -> dict[str, Any]:
     if not allowed:
         with get_db() as conn:
             return _get_job(conn, job_id)
-    fields = []
-    values: list[Any] = []
-    for key, value in allowed.items():
-        fields.append(f"{key} = ?")
-        values.append(value or "")
-    fields.append("updated_at = ?")
-    values.append(utc_now())
-    if "status" in allowed:
-        fields.append("status_updated_at = ?")
-        values.append(utc_now())
-    values.append(job_id)
     with get_db() as conn:
         before = _get_job(conn, job_id)
+        if before.get("lifecycle_state") == JOB_LIFECYCLE_TRASH:
+            raise HTTPException(status_code=409, detail="Recover this job before editing it.")
+        now = utc_now()
+        fields = []
+        values: list[Any] = []
+        for key, value in allowed.items():
+            fields.append(f"{key} = ?")
+            values.append(value or "")
+        fields.append("updated_at = ?")
+        values.append(now)
+        auto_archive = False
+        if "status" in allowed:
+            status_value = allowed["status"] or ""
+            auto_archive = _auto_archive_status(status_value)
+            fields.append("status_updated_at = ?")
+            values.append(now)
+            if auto_archive:
+                fields.extend(
+                    [
+                        "lifecycle_state = ?",
+                        "archived_at = ?",
+                        "trashed_at = NULL",
+                        "purge_after = NULL",
+                        "previous_lifecycle_state = NULL",
+                    ]
+                )
+                values.extend([JOB_LIFECYCLE_ARCHIVED, now])
+        values.append(job_id)
         conn.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id = ?", values)
         if "status" in allowed:
             log_event(conn, job_id, "status", f"{before.get('status', '')} -> {allowed['status'] or ''}")
+            if auto_archive:
+                log_event(conn, job_id, "archived", "Auto archived after terminal status.")
         else:
             log_event(conn, job_id, "edited", "Job fields updated.")
         return _get_job(conn, job_id)
+
+
+@app.post("/api/jobs/{job_id}/archive")
+def archive_job(job_id: int) -> dict[str, Any]:
+    with get_db() as conn:
+        job = _get_job(conn, job_id)
+        if job.get("lifecycle_state") == JOB_LIFECYCLE_TRASH:
+            raise HTTPException(status_code=409, detail="Recover this job before archiving it.")
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE jobs
+            SET lifecycle_state = ?, archived_at = ?, updated_at = ?,
+                trashed_at = NULL, purge_after = NULL, previous_lifecycle_state = NULL
+            WHERE id = ?
+            """,
+            (JOB_LIFECYCLE_ARCHIVED, now, now, job_id),
+        )
+        log_event(conn, job_id, "archived", "Manually archived.")
+        return _job_details(conn, job_id)
+
+
+@app.post("/api/jobs/{job_id}/restore")
+def restore_job(job_id: int) -> dict[str, Any]:
+    with get_db() as conn:
+        job = _get_job(conn, job_id)
+        if job.get("lifecycle_state") == JOB_LIFECYCLE_TRASH:
+            raise HTTPException(status_code=409, detail="Use recover for trashed jobs.")
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE jobs
+            SET lifecycle_state = ?, archived_at = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (JOB_LIFECYCLE_ACTIVE, now, job_id),
+        )
+        log_event(conn, job_id, "restored", "Restored to active jobs.")
+        return _job_details(conn, job_id)
+
+
+@app.delete("/api/jobs/{job_id}")
+def trash_job(job_id: int) -> dict[str, Any]:
+    with get_db() as conn:
+        job = _get_job(conn, job_id)
+        if job.get("lifecycle_state") == JOB_LIFECYCLE_TRASH:
+            return _job_details(conn, job_id)
+        now, purge_after = _trash_window()
+        previous_state = job.get("lifecycle_state") or JOB_LIFECYCLE_ACTIVE
+        if previous_state == JOB_LIFECYCLE_TRASH:
+            previous_state = JOB_LIFECYCLE_ACTIVE
+        conn.execute(
+            """
+            UPDATE jobs
+            SET lifecycle_state = ?, previous_lifecycle_state = ?, trashed_at = ?,
+                purge_after = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (JOB_LIFECYCLE_TRASH, previous_state, now, purge_after, now, job_id),
+        )
+        log_event(conn, job_id, "trashed", f"Recoverable until {purge_after}.")
+        return _job_details(conn, job_id)
+
+
+@app.post("/api/jobs/{job_id}/recover")
+def recover_job(job_id: int) -> dict[str, Any]:
+    with get_db() as conn:
+        job = _get_job(conn, job_id)
+        if job.get("lifecycle_state") != JOB_LIFECYCLE_TRASH:
+            return _job_details(conn, job_id)
+        purge_after = _parse_utc(job.get("purge_after"))
+        if purge_after and purge_after <= _utc_datetime():
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            raise HTTPException(status_code=410, detail="Recovery window expired; job was purged.")
+        restore_state = job.get("previous_lifecycle_state") or JOB_LIFECYCLE_ACTIVE
+        if restore_state not in {JOB_LIFECYCLE_ACTIVE, JOB_LIFECYCLE_ARCHIVED}:
+            restore_state = JOB_LIFECYCLE_ACTIVE
+        now = utc_now()
+        archived_at_update = "archived_at = archived_at"
+        values: list[Any] = [restore_state, now]
+        if restore_state == JOB_LIFECYCLE_ACTIVE:
+            archived_at_update = "archived_at = NULL"
+        elif not job.get("archived_at"):
+            archived_at_update = "archived_at = ?"
+            values.append(now)
+        values.append(job_id)
+        conn.execute(
+            f"""
+            UPDATE jobs
+            SET lifecycle_state = ?, trashed_at = NULL, purge_after = NULL,
+                previous_lifecycle_state = NULL, updated_at = ?, {archived_at_update}
+            WHERE id = ?
+            """,
+            values,
+        )
+        log_event(conn, job_id, "recovered", f"Recovered to {restore_state} jobs.")
+        return _job_details(conn, job_id)
 
 
 @app.post("/api/jobs/{job_id}/analyze")
@@ -495,7 +682,13 @@ def email_test() -> dict[str, Any]:
 @app.post("/api/email/sync")
 def email_sync() -> dict[str, Any]:
     with get_db() as conn:
-        jobs = rows_to_dicts(conn.execute("SELECT id, title, company FROM jobs").fetchall())
+        purge_expired_trashed_jobs(conn)
+        jobs = rows_to_dicts(
+            conn.execute(
+                "SELECT id, title, company FROM jobs WHERE lifecycle_state <> ?",
+                (JOB_LIFECYCLE_TRASH,),
+            ).fetchall()
+        )
         try:
             messages = sync_inbox(jobs)
         except Exception as exc:

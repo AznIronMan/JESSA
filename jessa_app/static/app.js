@@ -1,6 +1,7 @@
 const state = {
   jobs: [],
   selectedJobId: null,
+  jobView: "active",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -38,31 +39,92 @@ function badgeClass(value) {
   return "";
 }
 
+function jobViewLabel(view = state.jobView) {
+  return {
+    active: "active jobs",
+    archived: "archived jobs",
+    trash: "Trash Bin",
+  }[view] || "jobs";
+}
+
+function updateJobViewTabs() {
+  document.querySelectorAll("[data-job-view]").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.jobView === state.jobView);
+  });
+}
+
+function formatTimestamp(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function detailEmptyText() {
+  return state.jobView === "trash"
+    ? "Select a trashed job to recover it."
+    : `Select or import one of the ${jobViewLabel()}.`;
+}
+
+function setEmptyDetail() {
+  $("#job-detail").innerHTML = `<div class="empty-state">${escapeHtml(detailEmptyText())}</div>`;
+}
+
 function renderJobs() {
   const list = $("#job-list");
   if (!state.jobs.length) {
-    list.innerHTML = `<div class="empty-state">No jobs yet.</div>`;
+    list.innerHTML = `<div class="empty-state">No ${escapeHtml(jobViewLabel())}.</div>`;
     return;
   }
   list.innerHTML = state.jobs
     .map((job) => {
       const active = job.id === state.selectedJobId ? "active" : "";
       const score = job.match_score === null || job.match_score === undefined ? "--" : `${job.match_score}%`;
+      const lifecycle = job.lifecycle_state || "active";
+      const lifecycleBadge = lifecycle === "active" ? "" : `<span class="badge">${escapeHtml(lifecycle === "trash" ? "trash" : lifecycle)}</span>`;
+      const rowAction = lifecycle === "trash"
+        ? `<button class="job-row-action" data-recover-job="${job.id}">Recover</button>`
+        : `<button class="job-row-action danger" data-trash-job="${job.id}">Trash</button>`;
+      const purgeMeta = lifecycle === "trash" && job.purge_after
+        ? `<div class="job-subtitle">Purges ${escapeHtml(formatTimestamp(job.purge_after))}</div>`
+        : "";
       return `
-        <button class="job-item ${active}" data-job-id="${job.id}">
-          <div class="job-title">${escapeHtml(job.title || "Untitled job")}</div>
-          <div class="job-subtitle">${escapeHtml([job.company, job.location].filter(Boolean).join(" · "))}</div>
-          <div class="job-badges">
-            <span class="badge ${badgeClass(job.recommendation)}">${escapeHtml(job.recommendation || job.status || "new")}</span>
-            <span class="badge">${score}</span>
-            <span class="badge ${badgeClass(job.qualification_band)}">${escapeHtml(job.qualification_band || "unscored")}</span>
-            <span class="badge">${escapeHtml(job.resume_base || "resume")}</span>
-          </div>
-        </button>`;
+        <article class="job-item ${active}" data-job-id="${job.id}">
+          <button class="job-select" data-select-job="${job.id}">
+            <div class="job-title">${escapeHtml(job.title || "Untitled job")}</div>
+            <div class="job-subtitle">${escapeHtml([job.company, job.location].filter(Boolean).join(" · "))}</div>
+            ${purgeMeta}
+            <div class="job-badges">
+              <span class="badge ${badgeClass(job.recommendation)}">${escapeHtml(job.recommendation || job.status || "new")}</span>
+              <span class="badge">${score}</span>
+              <span class="badge ${badgeClass(job.qualification_band)}">${escapeHtml(job.qualification_band || "unscored")}</span>
+              <span class="badge">${escapeHtml(job.resume_base || "resume")}</span>
+              ${lifecycleBadge}
+            </div>
+          </button>
+          ${rowAction}
+        </article>`;
     })
     .join("");
-  list.querySelectorAll(".job-item").forEach((item) => {
-    item.addEventListener("click", () => selectJob(Number(item.dataset.jobId)));
+  list.querySelectorAll("[data-select-job]").forEach((item) => {
+    item.addEventListener("click", () => selectJob(Number(item.dataset.selectJob)));
+  });
+  list.querySelectorAll("[data-trash-job]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      trashJob(Number(button.dataset.trashJob)).catch((error) => toast(error.message));
+    });
+  });
+  list.querySelectorAll("[data-recover-job]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      recoverJob(Number(button.dataset.recoverJob)).catch((error) => toast(error.message));
+    });
   });
 }
 
@@ -75,7 +137,12 @@ function escapeHtml(value) {
 }
 
 async function loadJobs() {
-  state.jobs = await api("/api/jobs");
+  updateJobViewTabs();
+  state.jobs = await api(`/api/jobs?view=${encodeURIComponent(state.jobView)}`);
+  if (state.selectedJobId && !state.jobs.some((job) => job.id === state.selectedJobId)) {
+    state.selectedJobId = null;
+    setEmptyDetail();
+  }
   renderJobs();
 }
 
@@ -93,9 +160,36 @@ function analysisList(job, key) {
 }
 
 function renderJobDetail(job) {
-  const urlButton = job.apply_url || job.url
+  const lifecycle = job.lifecycle_state || "active";
+  const locked = lifecycle === "trash";
+  const formDisabled = locked ? "disabled" : "";
+  const textLocked = locked ? "readonly" : "";
+  const urlButton = !locked && (job.apply_url || job.url)
     ? `<button id="open-apply">Open</button>`
     : "";
+  const workActions = locked
+    ? ""
+    : `
+        ${urlButton}
+        <button id="analyze-job" class="primary">Analyze</button>
+        <button id="generate-package">Generate Docs</button>
+        <button id="save-job">Save</button>
+      `;
+  const lifecycleActions = lifecycle === "trash"
+    ? `<button id="recover-job" class="primary">Recover</button>`
+    : lifecycle === "archived"
+      ? `<button id="restore-job">Restore Active</button><button id="trash-job" class="danger">Trash</button>`
+      : `<button id="archive-job">Archive</button><button id="trash-job" class="danger">Trash</button>`;
+  const lifecycleNotice = lifecycle === "trash"
+    ? `<div class="lifecycle-notice bad">Trash Bin · purges ${escapeHtml(formatTimestamp(job.purge_after) || "after the recovery window")}</div>`
+    : lifecycle === "archived"
+      ? `<div class="lifecycle-notice">Archived · ${escapeHtml(formatTimestamp(job.archived_at) || "terminal status")}</div>`
+      : "";
+  const generateMaterialsButton = locked ? "" : `<button id="generate-package-inline">Generate Resume + Cover Letter</button>`;
+  const generateSupplementalButton = locked ? "" : `<button id="generate-supplemental">Generate Answers</button>`;
+  const supplementalPlaceholder = locked ? "" : "Paste supplemental/application questions here. The generated answers will be saved as an artifact and can be marked submitted.";
+  const artifactActionsDisabled = locked ? "disabled" : "";
+  const artifactContentLocked = locked ? "readonly" : "";
   const statuses = [
     ["new", "New"],
     ["not_applied", "Not Applied"],
@@ -114,12 +208,11 @@ function renderJobDetail(job) {
       <div>
         <h1>${escapeHtml(job.title || "Untitled job")}</h1>
         <div class="job-metadata">${escapeHtml([job.company, job.location, job.source].filter(Boolean).join(" · "))}</div>
+        ${lifecycleNotice}
       </div>
       <div class="detail-actions">
-        ${urlButton}
-        <button id="analyze-job" class="primary">Analyze</button>
-        <button id="generate-package">Generate Docs</button>
-        <button id="save-job">Save</button>
+        ${workActions}
+        ${lifecycleActions}
       </div>
     </div>
 
@@ -131,24 +224,24 @@ function renderJobDetail(job) {
     </div>
 
     <div class="field-grid">
-      <label>Title <input id="edit-title" value="${escapeHtml(job.title)}"></label>
-      <label>Company <input id="edit-company" value="${escapeHtml(job.company)}"></label>
-      <label>Location <input id="edit-location" value="${escapeHtml(job.location)}"></label>
-      <label>Salary <input id="edit-salary" value="${escapeHtml(job.salary)}"></label>
+      <label>Title <input id="edit-title" value="${escapeHtml(job.title)}" ${formDisabled}></label>
+      <label>Company <input id="edit-company" value="${escapeHtml(job.company)}" ${formDisabled}></label>
+      <label>Location <input id="edit-location" value="${escapeHtml(job.location)}" ${formDisabled}></label>
+      <label>Salary <input id="edit-salary" value="${escapeHtml(job.salary)}" ${formDisabled}></label>
       <label>Status
-        <select id="edit-status">
+        <select id="edit-status" ${formDisabled}>
           ${statuses.map(([value, label]) => (
             `<option value="${value}" ${job.status === value ? "selected" : ""}>${label}</option>`
           )).join("")}
         </select>
       </label>
       <label>Ask Range <input readonly value="${escapeHtml(job.salary_ask_range || "")}"></label>
-      <label>Posted <input id="edit-posted-date" value="${escapeHtml(job.posted_date)}"></label>
-      <label>Apply URL <input id="edit-apply-url" value="${escapeHtml(job.apply_url || job.url || "")}"></label>
+      <label>Posted <input id="edit-posted-date" value="${escapeHtml(job.posted_date)}" ${formDisabled}></label>
+      <label>Apply URL <input id="edit-apply-url" value="${escapeHtml(job.apply_url || job.url || "")}" ${formDisabled}></label>
     </div>
 
     <div class="full-field">
-      <label>Description <textarea id="edit-description">${escapeHtml(job.description)}</textarea></label>
+      <label>Description <textarea id="edit-description" ${textLocked}>${escapeHtml(job.description)}</textarea></label>
     </div>
 
     <section class="section">
@@ -178,19 +271,19 @@ function renderJobDetail(job) {
     <section class="section">
       <div class="section-title-row">
         <h2>Application Materials</h2>
-        <button id="generate-package-inline">Generate Resume + Cover Letter</button>
+        ${generateMaterialsButton}
       </div>
       <div class="artifact-list">
-        ${renderArtifacts(job.artifacts || [])}
+        ${renderArtifacts(job.artifacts || [], artifactActionsDisabled, artifactContentLocked)}
       </div>
     </section>
 
     <section class="section">
       <div class="section-title-row">
         <h2>Supplemental Questions</h2>
-        <button id="generate-supplemental">Generate Answers</button>
+        ${generateSupplementalButton}
       </div>
-      <textarea id="supplemental-questions" class="question-box" placeholder="Paste supplemental/application questions here. The generated answers will be saved as an artifact and can be marked submitted."></textarea>
+      <textarea id="supplemental-questions" class="question-box" placeholder="${escapeHtml(supplementalPlaceholder)}" ${textLocked}></textarea>
     </section>
 
     <section class="section">
@@ -210,11 +303,24 @@ function renderJobDetail(job) {
     </section>
   `;
 
-  $("#analyze-job").addEventListener("click", analyzeSelectedJob);
-  $("#generate-package").addEventListener("click", generatePackage);
-  $("#generate-package-inline").addEventListener("click", generatePackage);
-  $("#generate-supplemental").addEventListener("click", generateSupplemental);
-  $("#save-job").addEventListener("click", saveSelectedJob);
+  const analyze = $("#analyze-job");
+  if (analyze) analyze.addEventListener("click", analyzeSelectedJob);
+  const generate = $("#generate-package");
+  if (generate) generate.addEventListener("click", generatePackage);
+  const generateInline = $("#generate-package-inline");
+  if (generateInline) generateInline.addEventListener("click", generatePackage);
+  const supplemental = $("#generate-supplemental");
+  if (supplemental) supplemental.addEventListener("click", generateSupplemental);
+  const save = $("#save-job");
+  if (save) save.addEventListener("click", saveSelectedJob);
+  const archive = $("#archive-job");
+  if (archive) archive.addEventListener("click", () => archiveJob(job.id).catch((error) => toast(error.message)));
+  const restore = $("#restore-job");
+  if (restore) restore.addEventListener("click", () => restoreJob(job.id).catch((error) => toast(error.message)));
+  const trash = $("#trash-job");
+  if (trash) trash.addEventListener("click", () => trashJob(job.id).catch((error) => toast(error.message)));
+  const recover = $("#recover-job");
+  if (recover) recover.addEventListener("click", () => recoverJob(job.id).catch((error) => toast(error.message)));
   const open = $("#open-apply");
   if (open) {
     open.addEventListener("click", () => window.open(job.apply_url || job.url, "_blank", "noopener"));
@@ -240,7 +346,7 @@ function artifactTypeLabel(type) {
   }[type] || type;
 }
 
-function renderArtifacts(artifacts) {
+function renderArtifacts(artifacts, actionsDisabled = "", contentLocked = "") {
   if (!artifacts.length) {
     return `<p class="job-metadata">No generated materials yet.</p>`;
   }
@@ -254,12 +360,12 @@ function renderArtifacts(artifacts) {
         </div>
         <div class="artifact-actions">
           <button data-download-artifact="${artifact.id}">PDF</button>
-          <button data-save-artifact="${artifact.id}">Save</button>
-          <button data-submit-artifact="${artifact.id}">Mark Submitted</button>
+          <button data-save-artifact="${artifact.id}" ${actionsDisabled}>Save</button>
+          <button data-submit-artifact="${artifact.id}" ${actionsDisabled}>Mark Submitted</button>
         </div>
       </div>
-      <input class="artifact-title" id="artifact-title-${artifact.id}" value="${escapeHtml(artifact.title || "")}">
-      <textarea class="artifact-content" id="artifact-content-${artifact.id}">${escapeHtml(artifact.content || "")}</textarea>
+      <input class="artifact-title" id="artifact-title-${artifact.id}" value="${escapeHtml(artifact.title || "")}" ${actionsDisabled}>
+      <textarea class="artifact-content" id="artifact-content-${artifact.id}" ${contentLocked}>${escapeHtml(artifact.content || "")}</textarea>
     </article>
   `).join("");
 }
@@ -279,6 +385,50 @@ function renderEvents(events) {
     </div>`;
 }
 
+async function switchJobView(view) {
+  state.jobView = view;
+  state.selectedJobId = null;
+  updateJobViewTabs();
+  setEmptyDetail();
+  await loadJobs();
+}
+
+async function archiveJob(id) {
+  const job = await api(`/api/jobs/${id}/archive`, { method: "POST" });
+  state.jobView = job.lifecycle_state || "archived";
+  state.selectedJobId = job.id;
+  await loadJobs();
+  renderJobDetail(job);
+  toast("Job archived.");
+}
+
+async function restoreJob(id) {
+  const job = await api(`/api/jobs/${id}/restore`, { method: "POST" });
+  state.jobView = job.lifecycle_state || "active";
+  state.selectedJobId = job.id;
+  await loadJobs();
+  renderJobDetail(job);
+  toast("Job restored.");
+}
+
+async function trashJob(id) {
+  const job = await api(`/api/jobs/${id}`, { method: "DELETE" });
+  state.jobView = "trash";
+  state.selectedJobId = job.id;
+  await loadJobs();
+  renderJobDetail(job);
+  toast("Moved to Trash Bin.");
+}
+
+async function recoverJob(id) {
+  const job = await api(`/api/jobs/${id}/recover`, { method: "POST" });
+  state.jobView = job.lifecycle_state || "active";
+  state.selectedJobId = job.id;
+  await loadJobs();
+  renderJobDetail(job);
+  toast("Job recovered.");
+}
+
 async function importJob(useText) {
   const payload = useText
     ? { text: $("#job-text").value }
@@ -287,6 +437,7 @@ async function importJob(useText) {
     method: "POST",
     body: JSON.stringify(payload),
   });
+  state.jobView = job.lifecycle_state || "active";
   await loadJobs();
   await selectJob(job.id);
   toast("Job imported.");
@@ -358,9 +509,10 @@ async function saveSelectedJob() {
     method: "PUT",
     body: JSON.stringify(payload),
   });
+  state.jobView = job.lifecycle_state || state.jobView;
   await loadJobs();
   renderJobDetail(job);
-  toast("Job saved.");
+  toast(job.lifecycle_state === "archived" ? "Job saved and archived." : "Job saved.");
 }
 
 async function loadProfile() {
@@ -429,6 +581,9 @@ function setupTabs() {
 }
 
 function setupActions() {
+  document.querySelectorAll("[data-job-view]").forEach((tab) => {
+    tab.addEventListener("click", () => switchJobView(tab.dataset.jobView).catch((error) => toast(error.message)));
+  });
   $("#toggle-text-import").addEventListener("click", () => $("#text-import").classList.toggle("hidden"));
   $("#import-url").addEventListener("click", () => importJob(false).catch((error) => toast(error.message)));
   $("#import-text").addEventListener("click", () => importJob(true).catch((error) => toast(error.message)));

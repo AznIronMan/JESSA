@@ -20,6 +20,18 @@ class DatabaseConfigError(RuntimeError):
     """Raised when PostgreSQL is not configured or the driver is unavailable."""
 
 
+JOB_LIFECYCLE_ACTIVE = "active"
+JOB_LIFECYCLE_ARCHIVED = "archived"
+JOB_LIFECYCLE_TRASH = "trash"
+VALID_JOB_LIFECYCLE_STATES = {
+    JOB_LIFECYCLE_ACTIVE,
+    JOB_LIFECYCLE_ARCHIVED,
+    JOB_LIFECYCLE_TRASH,
+}
+AUTO_ARCHIVE_STATUSES = frozenset({"not_for_me", "job_expired", "rejected"})
+TRASH_RETENTION_HOURS = 24
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -197,6 +209,11 @@ SCHEMA_STATEMENTS = (
         cover_letter TEXT,
         resume_notes TEXT,
         status_updated_at TEXT,
+        lifecycle_state TEXT NOT NULL DEFAULT 'active',
+        archived_at TEXT,
+        trashed_at TEXT,
+        purge_after TEXT,
+        previous_lifecycle_state TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
@@ -246,13 +263,59 @@ SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_application_artifacts_job_id ON application_artifacts(job_id)",
 )
 
+JOB_LIFECYCLE_INDEX_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS idx_jobs_lifecycle_state ON jobs(lifecycle_state)",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_purge_after ON jobs(purge_after)",
+)
+
+
+def purge_expired_trashed_jobs(conn: Connection) -> int:
+    rows = conn.execute(
+        """
+        SELECT id
+        FROM jobs
+        WHERE lifecycle_state = ? AND purge_after IS NOT NULL AND purge_after <= ?
+        """,
+        (JOB_LIFECYCLE_TRASH, utc_now()),
+    ).fetchall()
+    for row in rows:
+        conn.execute("DELETE FROM jobs WHERE id = ?", (int(row["id"]),))
+    return len(rows)
+
+
+def _archive_existing_terminal_jobs(conn: Connection) -> None:
+    conn.execute(
+        """
+        UPDATE jobs
+        SET lifecycle_state = ?,
+            archived_at = COALESCE(archived_at, status_updated_at, updated_at, created_at, ?)
+        WHERE lifecycle_state = ?
+          AND status IN (?, ?, ?)
+        """,
+        (
+            JOB_LIFECYCLE_ARCHIVED,
+            utc_now(),
+            JOB_LIFECYCLE_ACTIVE,
+            *sorted(AUTO_ARCHIVE_STATUSES),
+        ),
+    )
+
 
 def init_db() -> None:
     with get_db() as conn:
         for statement in SCHEMA_STATEMENTS:
             conn.execute(statement)
         _ensure_column(conn, "jobs", "status_updated_at", "TEXT")
+        _ensure_column(conn, "jobs", "lifecycle_state", "TEXT NOT NULL DEFAULT 'active'")
+        _ensure_column(conn, "jobs", "archived_at", "TEXT")
+        _ensure_column(conn, "jobs", "trashed_at", "TEXT")
+        _ensure_column(conn, "jobs", "purge_after", "TEXT")
+        _ensure_column(conn, "jobs", "previous_lifecycle_state", "TEXT")
         _ensure_column(conn, "application_artifacts", "source_profile_version", "INTEGER")
+        for statement in JOB_LIFECYCLE_INDEX_STATEMENTS:
+            conn.execute(statement)
+        _archive_existing_terminal_jobs(conn)
+        purge_expired_trashed_jobs(conn)
         exists = conn.execute("SELECT 1 FROM core_profile WHERE id = 1").fetchone()
         if not exists:
             conn.execute(

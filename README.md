@@ -2,7 +2,7 @@
 
 JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `2.0.0`
+Current version: `2.1.0`
 
 ## v2.0 Scope
 
@@ -47,6 +47,21 @@ Current version: `2.0.0`
   - rejection
   - recruiter outreach
 - SMTP login test.
+
+## v2.1 Scope
+
+- Job lifecycle views in the left rail:
+  - active
+  - archived
+  - Trash Bin
+- Soft-delete jobs from the left list or detail view.
+- Recover trashed jobs for 24 hours.
+- Automatically purge Trash Bin jobs on startup or job-list access after the recovery window expires.
+- Auto-archive jobs when their status changes to:
+  - not for me
+  - job expired
+  - rejected
+- Restore archived jobs back to the active list.
 
 ## Setup
 
@@ -197,6 +212,8 @@ Paste a job URL and click `Import`. If a page is heavily dynamic, choose `Render
 
 Select a job on the left, review/edit fields, then click `Analyze`. JESSA updates the match metrics, salary target, resume base, resume notes, and cover letter.
 
+Use the left-rail lifecycle buttons to switch between active jobs, archived jobs, and the Trash Bin. Click `Trash` on a job row or in the detail header to move a job to the Trash Bin. Trashed jobs can be recovered for 24 hours; after that, JESSA purges them automatically the next time the app starts or loads a jobs view. Jobs marked `Not For Me`, `Job Expired`, or `Rejected` are moved to Archived automatically.
+
 Click `Generate Docs` to create a tailored resume and cover letter. These are stored in the Application Materials section as versioned artifacts. Edit the text if needed, click `Save`, then use `PDF` to download. After you submit a document to an employer, click `Mark Submitted` so JESSA records what went out and when.
 
 Paste application questions into `Supplemental Questions` and click `Generate Answers`. The generated answers are saved as another artifact, with the same save, PDF, and submitted tracking.
@@ -223,6 +240,8 @@ PostgreSQL tables:
 
 Generated resumes, cover letters, and supplemental answers are stored in `application_artifacts` with version numbers and submitted timestamps. `job_events` records status changes and document lifecycle actions.
 
+Job lifecycle state is stored on `jobs`. The app adds `lifecycle_state`, `archived_at`, `trashed_at`, `purge_after`, and `previous_lifecycle_state` on startup when needed. Trash Bin rows keep their related events and artifacts until the 24-hour purge deletes the job; `ON DELETE CASCADE` removes dependent job events and application artifacts at purge time.
+
 ## Versioning
 
 This project uses semantic versioning.
@@ -230,6 +249,7 @@ This project uses semantic versioning.
 - `1.0.x`: bug fixes and small UI/API improvements.
 - `1.x.0`: additive features that preserve the local database shape or migrate it safely.
 - `2.0.0`: breaking schema or workflow changes.
+- `2.x.0`: additive features on the PostgreSQL workflow with safe schema migration.
 
 ## Roadmap
 

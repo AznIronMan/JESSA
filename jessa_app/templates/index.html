@@ -34,7 +34,14 @@
         <button id="import-text">Import Text</button>
       </section>
       <section class="workspace">
-        <aside class="job-list" id="job-list"></aside>
+        <aside class="job-sidebar">
+          <div class="job-view-tabs" aria-label="Job lifecycle views">
+            <button class="job-view-tab active" data-job-view="active">ACTIVE</button>
+            <button class="job-view-tab" data-job-view="archived">ARCHIVED</button>
+            <button class="job-view-tab" data-job-view="trash">TRASH BIN</button>
+          </div>
+          <div class="job-list" id="job-list"></div>
+        </aside>
         <section class="job-detail" id="job-detail">
           <div class="empty-state">Select or import a job.</div>
         </section>
