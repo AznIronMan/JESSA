@@ -15,6 +15,13 @@ from .. import config
 
 
 @dataclass
+class EmailJobMatch:
+    job_id: int | None = None
+    confidence: float = 0.0
+    reason: str = ""
+
+
+@dataclass
 class ClassifiedEmail:
     message_id: str
     subject: str
@@ -25,6 +32,27 @@ class ClassifiedEmail:
     summary: str
     raw_excerpt: str
     job_id: int | None = None
+    match_confidence: float = 0.0
+    match_reason: str = ""
+
+
+JOB_MATCH_STOP_WORDS = {
+    "and",
+    "for",
+    "from",
+    "with",
+    "the",
+    "your",
+    "you",
+    "job",
+    "role",
+    "remote",
+    "hybrid",
+    "onsite",
+    "manager",
+    "senior",
+    "lead",
+}
 
 
 def _decode(value: str | None) -> str:
@@ -72,11 +100,45 @@ def _clean(value: str, limit: int = 1000) -> str:
 def classify(subject: str, body: str) -> tuple[str, float, str]:
     text = f"{subject}\n{body}".lower()
     checks = [
-        ("interview_request", 0.86, ["interview", "schedule a call", "availability", "phone screen", "next steps"]),
-        ("assessment_request", 0.82, ["assessment", "coding challenge", "technical test", "take-home", "skills test"]),
-        ("rejection", 0.84, ["unfortunately", "not selected", "not be moving forward", "pursue other candidates", "decided to move forward with other"]),
-        ("application_confirmation", 0.80, ["application received", "received your application", "thank you for applying", "application has been submitted", "we have your application"]),
-        ("recruiter_outreach", 0.62, ["opportunity", "contract role", "w2", "c2c", "recruiter", "staffing", "resume"]),
+        (
+            "interview_request",
+            0.88,
+            ["interview", "schedule a call", "availability", "phone screen", "next steps", "meet with", "calendar"],
+        ),
+        (
+            "assessment_request",
+            0.84,
+            ["assessment", "coding challenge", "technical test", "take-home", "skills test", "hackerrank", "codility"],
+        ),
+        (
+            "rejection",
+            0.86,
+            [
+                "unfortunately",
+                "not selected",
+                "not be moving forward",
+                "pursue other candidates",
+                "decided to move forward with other",
+                "will not be proceeding",
+            ],
+        ),
+        (
+            "application_confirmation",
+            0.82,
+            [
+                "application received",
+                "received your application",
+                "thank you for applying",
+                "application has been submitted",
+                "we have your application",
+                "thanks for applying",
+            ],
+        ),
+        (
+            "recruiter_outreach",
+            0.64,
+            ["opportunity", "contract role", "w2", "c2c", "recruiter", "staffing", "resume", "sourcing"],
+        ),
     ]
     for label, confidence, needles in checks:
         if any(needle in text for needle in needles):
@@ -84,17 +146,53 @@ def classify(subject: str, body: str) -> tuple[str, float, str]:
     return "unclassified", 0.25, _clean(body, 240)
 
 
-def _match_job(subject: str, body: str, jobs: Iterable[dict]) -> int | None:
+def _tokens(value: str) -> list[str]:
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", value.lower())
+        if len(token) > 2 and token not in JOB_MATCH_STOP_WORDS
+    ]
+
+
+def _sender_domain(sender: str) -> str:
+    match = re.search(r"@([A-Za-z0-9.-]+)", sender)
+    return match.group(1).lower() if match else ""
+
+
+def _match_job(subject: str, body: str, sender: str, jobs: Iterable[dict]) -> EmailJobMatch:
     text = f"{subject} {body}".lower()
+    sender_domain = _sender_domain(sender)
+    best = EmailJobMatch()
     for job in jobs:
-        company = (job.get("company") or "").lower()
-        title = (job.get("title") or "").lower()
+        score = 0.0
+        reasons: list[str] = []
+        company = _clean(str(job.get("company") or ""), 120).lower()
+        title = _clean(str(job.get("title") or ""), 180).lower()
         if company and len(company) > 2 and company in text:
-            return int(job["id"])
-        title_words = [word for word in re.split(r"\W+", title) if len(word) > 4]
-        if title_words and sum(1 for word in title_words if word in text) >= min(2, len(title_words)):
-            return int(job["id"])
-    return None
+            score += 0.62
+            reasons.append("company name")
+        else:
+            company_tokens = _tokens(company)
+            company_hits = [token for token in company_tokens if token in text]
+            if company_tokens and len(company_hits) >= min(2, len(company_tokens)):
+                score += min(0.42, 0.16 * len(company_hits))
+                reasons.append(f"company tokens {len(company_hits)}/{len(company_tokens)}")
+        title_tokens = _tokens(title)
+        title_hits = [token for token in title_tokens if token in text]
+        if title_tokens and len(title_hits) >= min(2, len(title_tokens)):
+            score += min(0.38, 0.11 * len(title_hits))
+            reasons.append(f"title tokens {len(title_hits)}/{len(title_tokens)}")
+        domain_tokens = [token for token in _tokens(company) if len(token) > 3]
+        if sender_domain and any(token in sender_domain for token in domain_tokens):
+            score += 0.18
+            reasons.append("sender domain")
+        if score > best.confidence:
+            best = EmailJobMatch(
+                job_id=int(job["id"]),
+                confidence=min(score, 0.98),
+                reason=", ".join(reasons),
+            )
+    return best if best.confidence >= 0.45 else EmailJobMatch()
 
 
 def test_smtp() -> None:
@@ -130,6 +228,7 @@ def sync_inbox(jobs: list[dict]) -> list[ClassifiedEmail]:
             message_id = message.get("Message-ID") or f"imap-{msg_id.decode()}"
             body = _body(message)
             classification, confidence, summary = classify(subject, body)
+            match = _match_job(subject, body, sender, jobs)
             received = message.get("Date")
             try:
                 received_at = parsedate_to_datetime(received).astimezone(timezone.utc).isoformat(timespec="seconds") if received else ""
@@ -145,7 +244,9 @@ def sync_inbox(jobs: list[dict]) -> list[ClassifiedEmail]:
                     confidence=confidence,
                     summary=summary,
                     raw_excerpt=_clean(body, 1200),
-                    job_id=_match_job(subject, body, jobs),
+                    job_id=match.job_id,
+                    match_confidence=match.confidence,
+                    match_reason=match.reason,
                 )
             )
     return results

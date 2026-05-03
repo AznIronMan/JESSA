@@ -572,7 +572,7 @@ textarea {
 
 .email-row {
   display: grid;
-  grid-template-columns: 180px 1fr 120px;
+  grid-template-columns: 180px 1fr minmax(160px, 220px);
   gap: 12px;
   border-bottom: 1px solid var(--line);
   padding: 10px 0;

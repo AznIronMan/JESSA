@@ -118,6 +118,30 @@ JOB_STATUS_VALUES = {
     "rejected",
 }
 
+EMAIL_STATUS_CLASSIFICATIONS = {
+    "application_confirmation": "applied",
+    "assessment_request": "follow-up",
+    "interview_request": "interview",
+    "rejection": "rejected",
+}
+
+EMAIL_STATUS_RANK = {
+    "new": 0,
+    "not_applied": 0,
+    "tailor": 1,
+    "ready": 2,
+    "on_hold": 2,
+    "applied": 3,
+    "follow-up": 4,
+    "interview": 5,
+    "not_for_me": 99,
+    "job_expired": 99,
+    "rejected": 99,
+}
+
+EMAIL_STATUS_MIN_CLASSIFICATION_CONFIDENCE = 0.78
+EMAIL_STATUS_MIN_MATCH_CONFIDENCE = 0.55
+
 JOB_LIST_VIEWS = {
     JOB_LIFECYCLE_ACTIVE,
     JOB_LIFECYCLE_ARCHIVED,
@@ -154,6 +178,68 @@ def _parse_utc(value: str | None) -> datetime | None:
 
 def _auto_archive_status(status: str | None) -> bool:
     return str(status or "").strip() in AUTO_ARCHIVE_STATUSES
+
+
+def _email_suggested_status(message: Any) -> str:
+    if float(getattr(message, "confidence", 0.0) or 0.0) < EMAIL_STATUS_MIN_CLASSIFICATION_CONFIDENCE:
+        return ""
+    if float(getattr(message, "match_confidence", 0.0) or 0.0) < EMAIL_STATUS_MIN_MATCH_CONFIDENCE:
+        return ""
+    return EMAIL_STATUS_CLASSIFICATIONS.get(str(getattr(message, "classification", "") or ""), "")
+
+
+def _should_apply_email_status(current_status: str, suggested_status: str) -> bool:
+    if not suggested_status:
+        return False
+    if suggested_status == "rejected":
+        return current_status not in {"rejected", "not_for_me", "job_expired"}
+    if current_status in AUTO_ARCHIVE_STATUSES:
+        return False
+    return EMAIL_STATUS_RANK.get(suggested_status, 0) > EMAIL_STATUS_RANK.get(current_status or "new", 0)
+
+
+def _apply_email_status(conn, message: Any) -> str:
+    job_id = getattr(message, "job_id", None)
+    if not job_id:
+        return ""
+    suggested_status = _email_suggested_status(message)
+    if not suggested_status:
+        return ""
+    job = conn.execute(
+        "SELECT id, status, lifecycle_state FROM jobs WHERE id = ?",
+        (int(job_id),),
+    ).fetchone()
+    if not job or job.get("lifecycle_state") == JOB_LIFECYCLE_TRASH:
+        return ""
+    current_status = str(job.get("status") or "new")
+    if not _should_apply_email_status(current_status, suggested_status):
+        return ""
+    now = utc_now()
+    if _auto_archive_status(suggested_status):
+        conn.execute(
+            """
+            UPDATE jobs
+            SET status = ?, status_updated_at = ?, updated_at = ?,
+                lifecycle_state = ?, archived_at = ?, trashed_at = NULL,
+                purge_after = NULL, previous_lifecycle_state = NULL
+            WHERE id = ?
+            """,
+            (suggested_status, now, now, JOB_LIFECYCLE_ARCHIVED, now, int(job_id)),
+        )
+        log_event(conn, int(job_id), "archived", "Auto archived after email terminal status.")
+    else:
+        conn.execute(
+            "UPDATE jobs SET status = ?, status_updated_at = ?, updated_at = ? WHERE id = ?",
+            (suggested_status, now, now, int(job_id)),
+        )
+    note = f"{current_status} -> {suggested_status}"
+    log_event(
+        conn,
+        int(job_id),
+        "status",
+        f"{note} from email:{getattr(message, 'classification', '')}",
+    )
+    return note
 
 
 def _normalize_job_ids(job_ids: list[int]) -> list[int]:
@@ -966,14 +1052,16 @@ def email_sync() -> dict[str, Any]:
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         inserted = 0
+        status_updates = 0
         for message in messages:
             cur = conn.execute(
                 """
                 INSERT INTO emails (
                     message_id, job_id, subject, sender, received_at, classification,
-                    confidence, summary, raw_excerpt, created_at
+                    confidence, match_confidence, match_reason, status_action,
+                    summary, raw_excerpt, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (message_id) DO NOTHING
                 """,
                 (
@@ -984,6 +1072,9 @@ def email_sync() -> dict[str, Any]:
                     message.received_at,
                     message.classification,
                     message.confidence,
+                    message.match_confidence,
+                    message.match_reason,
+                    "",
                     message.summary,
                     message.raw_excerpt,
                     utc_now(),
@@ -992,14 +1083,64 @@ def email_sync() -> dict[str, Any]:
             if cur.rowcount:
                 inserted += 1
                 if message.job_id:
-                    log_event(conn, message.job_id, f"email:{message.classification}", message.subject)
+                    log_event(
+                        conn,
+                        message.job_id,
+                        f"email:{message.classification}",
+                        f"{message.subject} ({message.match_confidence:.2f}: {message.match_reason or 'matched'})",
+                    )
+                    status_action = _apply_email_status(conn, message)
+                    if status_action:
+                        status_updates += 1
+                        conn.execute(
+                            "UPDATE emails SET status_action = ? WHERE message_id = ?",
+                            (status_action, message.message_id),
+                        )
+            else:
+                conn.execute(
+                    """
+                    UPDATE emails
+                    SET job_id = ?, classification = ?, confidence = ?,
+                        match_confidence = ?, match_reason = ?,
+                        summary = ?, raw_excerpt = ?
+                    WHERE message_id = ?
+                    """,
+                    (
+                        message.job_id,
+                        message.classification,
+                        message.confidence,
+                        message.match_confidence,
+                        message.match_reason,
+                        message.summary,
+                        message.raw_excerpt,
+                        message.message_id,
+                    ),
+                )
         recent = rows_to_dicts(
-            conn.execute("SELECT * FROM emails ORDER BY received_at DESC, id DESC LIMIT 50").fetchall()
+            conn.execute(
+                """
+                SELECT e.*, j.title AS job_title, j.company AS job_company
+                FROM emails e
+                LEFT JOIN jobs j ON j.id = e.job_id
+                ORDER BY e.received_at DESC, e.id DESC
+                LIMIT 50
+                """
+            ).fetchall()
         )
-        return {"fetched": len(messages), "inserted": inserted, "emails": recent}
+        return {"fetched": len(messages), "inserted": inserted, "status_updates": status_updates, "emails": recent}
 
 
 @app.get("/api/emails")
 def list_emails() -> list[dict[str, Any]]:
     with get_db() as conn:
-        return rows_to_dicts(conn.execute("SELECT * FROM emails ORDER BY received_at DESC, id DESC LIMIT 100").fetchall())
+        return rows_to_dicts(
+            conn.execute(
+                """
+                SELECT e.*, j.title AS job_title, j.company AS job_company
+                FROM emails e
+                LEFT JOIN jobs j ON j.id = e.job_id
+                ORDER BY e.received_at DESC, e.id DESC
+                LIMIT 100
+                """
+            ).fetchall()
+        )

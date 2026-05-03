@@ -90,6 +90,12 @@ function formatTimestamp(value) {
   });
 }
 
+function formatPercent(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return `${Math.round(number * 100)}%`;
+}
+
 function detailEmptyText() {
   return state.jobView === "trash"
     ? "Select a trashed job to recover it."
@@ -364,8 +370,16 @@ function renderJobDetail(job) {
       <h2>Email</h2>
       ${(job.emails || []).map((message) => `
         <div class="email-row">
-          <div>${escapeHtml(message.classification)}</div>
-          <div><strong>${escapeHtml(message.subject)}</strong><br><span class="job-metadata">${escapeHtml(message.summary)}</span></div>
+          <div>
+            <span class="badge ${badgeClass(message.classification)}">${escapeHtml(message.classification)}</span>
+            ${message.status_action ? `<div class="job-metadata">status ${escapeHtml(message.status_action)}</div>` : ""}
+          </div>
+          <div>
+            <strong>${escapeHtml(message.subject)}</strong>
+            <div class="job-metadata">${escapeHtml(message.sender || "")}</div>
+            <div class="job-metadata">${escapeHtml(message.summary)}</div>
+            ${message.match_reason ? `<div class="job-metadata">match ${escapeHtml(formatPercent(message.match_confidence))} · ${escapeHtml(message.match_reason)}</div>` : ""}
+          </div>
           <div>${escapeHtml(message.received_at || "")}</div>
         </div>
       `).join("") || `<p class="job-metadata">No matched email yet.</p>`}
@@ -702,13 +716,19 @@ function renderEmails(emails) {
         <div>
           <span class="badge ${badgeClass(message.classification)}">${escapeHtml(message.classification)}</span>
           <div class="job-metadata">${escapeHtml(message.received_at || "")}</div>
+          ${message.status_action ? `<div class="job-metadata">status ${escapeHtml(message.status_action)}</div>` : ""}
         </div>
         <div>
           <strong>${escapeHtml(message.subject)}</strong>
           <div class="job-metadata">${escapeHtml(message.sender)}</div>
+          ${message.match_reason ? `<div class="job-metadata">match ${escapeHtml(formatPercent(message.match_confidence))} · ${escapeHtml(message.match_reason)}</div>` : ""}
           <p>${escapeHtml(message.summary)}</p>
         </div>
-        <div>${message.job_id ? `Job #${message.job_id}` : "Unmatched"}</div>
+        <div>
+          ${message.job_id
+            ? `<strong>Job #${message.job_id}</strong><div class="job-metadata">${escapeHtml([message.job_company, message.job_title].filter(Boolean).join(" · "))}</div>`
+            : "Unmatched"}
+        </div>
       </div>
     `).join("")
     : `<div class="empty-state">No email imported.</div>`;
@@ -718,7 +738,7 @@ async function syncEmail() {
   $("#email-status").textContent = "Syncing...";
   const result = await api("/api/email/sync", { method: "POST" });
   renderEmails(result.emails);
-  $("#email-status").textContent = `${result.inserted} new / ${result.fetched} fetched`;
+  $("#email-status").textContent = `${result.inserted} new / ${result.fetched} fetched / ${result.status_updates || 0} status updates`;
 }
 
 async function testEmail() {

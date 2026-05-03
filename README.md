@@ -2,7 +2,7 @@
 
 JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `2.3.4`
+Current version: `2.4.0`
 
 ## v2.0 Scope
 
@@ -80,6 +80,13 @@ Current version: `2.3.4`
 - Geoff's LinkedIn profile can be cached from a profile URL or saved from pasted profile text.
 - LinkedIn profile caching captures the main profile plus supported detail sections such as experience, education, certifications, skills, projects, volunteering, recommendations, and honors.
 - Cached LinkedIn profile content is appended to the candidate context for job analysis, application package generation, and supplemental answers.
+
+## v2.4 Scope
+
+- Email sync records job-match confidence and match reasoning for linked messages.
+- High-confidence matched application emails can advance job status automatically.
+- Rejection emails mark matched jobs as `rejected`, which moves them to Archived through the existing terminal-status lifecycle rule.
+- Email views show match reasoning, matched job labels, and any status action taken during sync.
 
 ## Setup
 
@@ -258,7 +265,7 @@ Resume-source rule: the Director and DevSecOps resumes are the preferred current
 
 ### Email
 
-`Sync Inbox` checks recent inbox messages, classifies job-search mail, and links messages to jobs by company/title when possible. `Test SMTP` only verifies login; JESSA does not auto-send email.
+`Sync Inbox` checks recent inbox messages, classifies job-search mail, and links messages to jobs by company/title when possible. Linked messages include match confidence and the reason they matched. When both the email classification and job match are high confidence, JESSA can advance status from application confirmation, assessment, interview, and rejection emails. Rejection emails use the existing terminal-status archive behavior. `Test SMTP` only verifies login; JESSA does not auto-send email.
 
 ## Data Model
 
@@ -271,6 +278,8 @@ PostgreSQL tables:
 - `application_artifacts`
 
 Generated resumes, cover letters, and supplemental answers are stored in `application_artifacts` with version numbers and submitted timestamps. `job_events` records status changes and document lifecycle actions.
+
+Email match metadata is stored on `emails` with `match_confidence`, `match_reason`, and `status_action`. These columns are added on startup when needed.
 
 Job lifecycle state is stored on `jobs`. The app adds `lifecycle_state`, `archived_at`, `trashed_at`, `purge_after`, and `previous_lifecycle_state` on startup when needed. Trash Bin rows keep their related events and artifacts until the 24-hour purge deletes the job; `ON DELETE CASCADE` removes dependent job events and application artifacts at purge time.
 
@@ -294,6 +303,12 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 2.4.0
+
+- Added email job-match confidence and match-reason metadata.
+- Added guarded email-driven status updates for confirmations, assessments, interviews, and rejections.
+- Updated email views to show match reasoning, matched job labels, and status actions.
 
 ### 2.3.4
 

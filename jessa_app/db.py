@@ -237,6 +237,9 @@ SCHEMA_STATEMENTS = (
         received_at TEXT NOT NULL DEFAULT '',
         classification TEXT NOT NULL DEFAULT '',
         confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+        match_confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+        match_reason TEXT NOT NULL DEFAULT '',
+        status_action TEXT NOT NULL DEFAULT '',
         summary TEXT NOT NULL DEFAULT '',
         raw_excerpt TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
@@ -321,6 +324,9 @@ def init_db() -> None:
         _ensure_column(conn, "jobs", "trashed_at", "TEXT")
         _ensure_column(conn, "jobs", "purge_after", "TEXT")
         _ensure_column(conn, "jobs", "previous_lifecycle_state", "TEXT")
+        _ensure_column(conn, "emails", "match_confidence", "DOUBLE PRECISION NOT NULL DEFAULT 0")
+        _ensure_column(conn, "emails", "match_reason", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "emails", "status_action", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "application_artifacts", "source_profile_version", "INTEGER")
         for statement in JOB_LIFECYCLE_INDEX_STATEMENTS:
             conn.execute(statement)
