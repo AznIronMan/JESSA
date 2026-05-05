@@ -32,6 +32,7 @@ from .db import (
     utc_now,
 )
 from .defaults import DEFAULT_CORE_PROFILE
+from .env_settings import settings_payload, update_env_values
 from .services.email_client import sync_inbox, test_smtp
 from .services.importer import ImportedJob, fetch_linkedin_profile, import_from_text, import_from_url
 from .services.llm import analyze_job, answer_supplemental_questions, generate_application_package
@@ -113,6 +114,10 @@ class ImportRequest(BaseModel):
 
 class ProfileUpdate(BaseModel):
     content: str
+
+
+class SettingsUpdate(BaseModel):
+    values: dict[str, str]
 
 
 class LinkedInProfileUpdate(BaseModel):
@@ -630,6 +635,16 @@ def startup_status() -> dict[str, Any]:
     global STARTUP_STATUS
     STARTUP_STATUS = _build_startup_status(initialize=False)
     return STARTUP_STATUS
+
+
+@app.get("/api/settings")
+def get_settings() -> dict[str, Any]:
+    return settings_payload()
+
+
+@app.put("/api/settings")
+def update_settings(update: SettingsUpdate) -> dict[str, Any]:
+    return update_env_values(update.values)
 
 
 @app.get("/api/profile")

@@ -88,10 +88,25 @@ textarea {
   gap: 8px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .tab.active {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+.icon-button {
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  font-size: 18px;
 }
 
 .view {
@@ -654,6 +669,103 @@ textarea {
   box-shadow: 0 10px 30px rgb(16 24 40 / 20%);
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgb(17 24 39 / 45%);
+  display: grid;
+  place-items: stretch;
+  padding: 24px;
+}
+
+.modal-backdrop.hidden {
+  display: none;
+}
+
+.settings-dialog {
+  width: min(1100px, 100%);
+  max-height: calc(100vh - 48px);
+  margin: auto;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgb(16 24 40 / 30%);
+}
+
+.settings-header,
+.settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-footer {
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+}
+
+.settings-header h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+#settings-status,
+#settings-save-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-body {
+  overflow: auto;
+  padding: 14px 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.settings-group {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fff;
+}
+
+.settings-group h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.settings-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-field input,
+.settings-field select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+}
+
+.settings-help {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .hidden {
   display: none;
 }
@@ -666,6 +778,19 @@ textarea {
     flex-direction: column;
     gap: 10px;
     padding: 12px;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .settings-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-backdrop {
+    padding: 10px;
   }
 
   .import-band {

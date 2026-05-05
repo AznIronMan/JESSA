@@ -1,5 +1,6 @@
 const state = {
   startup: null,
+  settings: null,
   jobs: [],
   selectedJobId: null,
   jobView: "active",
@@ -117,6 +118,75 @@ function renderSetup() {
       await loadLinkedInProfile();
     });
   }
+}
+
+async function openSettings() {
+  $("#settings-modal").classList.remove("hidden");
+  $("#settings-status").textContent = "loading...";
+  state.settings = await api("/api/settings");
+  renderSettings();
+}
+
+function closeSettings() {
+  $("#settings-modal").classList.add("hidden");
+}
+
+function renderSettingsField(field) {
+  const value = field.value || "";
+  const configured = field.secret && field.has_value ? "Configured. Leave blank to keep current value." : "";
+  const help = field.help || configured;
+  if (field.kind === "boolean") {
+    const normalized = String(value || "").toLowerCase();
+    return `
+      <label class="settings-field">
+        <span>${escapeHtml(field.label)}</span>
+        <select data-setting-name="${escapeHtml(field.name)}">
+          <option value=""></option>
+          <option value="true" ${normalized === "true" || normalized === "1" || normalized === "yes" ? "selected" : ""}>true</option>
+          <option value="false" ${normalized === "false" || normalized === "0" || normalized === "no" ? "selected" : ""}>false</option>
+        </select>
+        ${help ? `<span class="settings-help">${escapeHtml(help)}</span>` : ""}
+      </label>`;
+  }
+  const type = field.secret ? "password" : field.kind === "number" ? "number" : "text";
+  const placeholder = field.secret && field.has_value ? "configured" : "";
+  return `
+    <label class="settings-field">
+      <span>${escapeHtml(field.label)}</span>
+      <input data-setting-name="${escapeHtml(field.name)}" type="${type}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" />
+      ${help ? `<span class="settings-help">${escapeHtml(help)}</span>` : ""}
+    </label>`;
+}
+
+function renderSettings() {
+  const settings = state.settings;
+  if (!settings) return;
+  $("#settings-status").textContent = settings.restart_required ? "changes require restart" : "";
+  $("#settings-save-status").textContent = "";
+  $("#settings-body").innerHTML = settings.groups
+    .map((group) => `
+      <section class="settings-group">
+        <h2>${escapeHtml(group.name)}</h2>
+        <div class="settings-fields">
+          ${group.fields.map(renderSettingsField).join("")}
+        </div>
+      </section>`)
+    .join("");
+}
+
+async function saveSettings() {
+  const values = {};
+  document.querySelectorAll("[data-setting-name]").forEach((field) => {
+    values[field.dataset.settingName] = field.value;
+  });
+  $("#settings-save-status").textContent = "saving...";
+  state.settings = await api("/api/settings", {
+    method: "PUT",
+    body: JSON.stringify({ values }),
+  });
+  renderSettings();
+  $("#settings-save-status").textContent = "saved; restart JESSA to apply changes";
+  toast("Settings saved. Restart JESSA to apply them.");
 }
 
 function badgeClass(value) {
@@ -898,6 +968,15 @@ function setupActions() {
   $("#save-linkedin-profile").addEventListener("click", () => saveLinkedInProfile().catch((error) => toast(error.message)));
   $("#fetch-linkedin-profile").addEventListener("click", () => fetchLinkedInProfileCache().catch((error) => {
     $("#linkedin-profile-status").textContent = "cache failed";
+    toast(error.message);
+  }));
+  $("#open-settings").addEventListener("click", () => openSettings().catch((error) => toast(error.message)));
+  $("#close-settings").addEventListener("click", closeSettings);
+  $("#settings-modal").addEventListener("click", (event) => {
+    if (event.target.id === "settings-modal") closeSettings();
+  });
+  $("#save-settings").addEventListener("click", () => saveSettings().catch((error) => {
+    $("#settings-save-status").textContent = "save failed";
     toast(error.message);
   }));
   $("#sync-email").addEventListener("click", () => syncEmail().catch((error) => {

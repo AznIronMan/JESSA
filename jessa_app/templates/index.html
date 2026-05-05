@@ -12,12 +12,15 @@
         <div class="brand">JESSA</div>
         <div class="meta">v{{ version }} · {{ model }} · {{ email_user or "email not configured" }}</div>
       </div>
-      <nav class="tabs" aria-label="Views">
-        <button class="tab hidden" data-tab="setup" id="setup-tab">Setup</button>
-        <button class="tab active" data-tab="jobs">Jobs</button>
-        <button class="tab" data-tab="profile">Core Profile</button>
-        <button class="tab" data-tab="email">Email</button>
-      </nav>
+      <div class="topbar-actions">
+        <nav class="tabs" aria-label="Views">
+          <button class="tab hidden" data-tab="setup" id="setup-tab">Setup</button>
+          <button class="tab active" data-tab="jobs">Jobs</button>
+          <button class="tab" data-tab="profile">Core Profile</button>
+          <button class="tab" data-tab="email">Email</button>
+        </nav>
+        <button class="icon-button" id="open-settings" title="Settings" aria-label="Settings">&#9881;</button>
+      </div>
     </header>
 
     <main class="view" id="setup-view">
@@ -136,6 +139,22 @@
     </main>
 
     <div class="toast hidden" id="toast"></div>
+    <div class="modal-backdrop hidden" id="settings-modal">
+      <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="settings-header">
+          <div>
+            <h1 id="settings-title">Settings</h1>
+            <span id="settings-status"></span>
+          </div>
+          <button class="icon-button" id="close-settings" title="Close settings" aria-label="Close settings">x</button>
+        </div>
+        <div class="settings-body" id="settings-body"></div>
+        <div class="settings-footer">
+          <span id="settings-save-status"></span>
+          <button id="save-settings">Save Settings</button>
+        </div>
+      </section>
+    </div>
     <script src="/static/app.js"></script>
   </body>
 </html>

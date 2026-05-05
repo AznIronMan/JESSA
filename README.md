@@ -2,7 +2,14 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.1.0`
+Current version: `3.2.0`
+
+## v3.2 Scope
+
+- Added a gear-button Settings dialog in the top bar.
+- Settings can edit supported `.env` values through grouped, user-friendly controls.
+- Secret values are write-only in the UI: configured keys are indicated, but current secret values are not returned by the API.
+- Saving settings preserves unknown `.env` entries and comments where possible; restart JESSA after saving to apply changed environment values.
 
 ## v3.1 Scope
 
@@ -168,6 +175,8 @@ The launcher binds to `0.0.0.0` by default so other `10.0.x.x` devices can reach
 ## Environment
 
 The app reads `.env` from the project root. Keep `.env` out of git.
+
+Use the gear button in the top-right corner to edit supported `.env` settings from the web UI. Secret values are not displayed; leave a secret field blank to keep the existing value, or type a new value to replace it. Restart JESSA after saving settings.
 
 Minimum:
 
@@ -338,6 +347,7 @@ This project uses semantic versioning.
 - `2.x.0`: additive features on the PostgreSQL workflow with safe schema migration.
 - `3.0.0`: portability release that removes hardcoded personal defaults and starts new databases from generic candidate templates.
 - `3.1.0`: setup/onboarding and multi-provider LLM configuration improvements.
+- `3.2.0`: settings UI improvements that preserve the existing data model.
 
 ## Roadmap
 
@@ -348,6 +358,14 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.2.0
+
+- Added a top-right gear button for a Settings dialog.
+- Added `/api/settings` endpoints for reading and updating supported `.env` keys.
+- Added grouped settings controls for LLM providers, PostgreSQL, email, access, paths, and LinkedIn options.
+- Kept secrets masked/write-only in the settings API and UI.
+- Documented that a restart is required after settings changes.
 
 ### 3.1.0
 
