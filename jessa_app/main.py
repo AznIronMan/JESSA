@@ -33,7 +33,7 @@ from .db import (
 )
 from .defaults import DEFAULT_CORE_PROFILE
 from .env_settings import settings_payload, update_env_values
-from .services.email_client import sync_inbox, test_smtp
+from .services.email_client import classify, match_job, sync_inbox, test_smtp
 from .services.importer import ImportedJob, fetch_linkedin_profile, import_from_text, import_from_url
 from .services.llm import analyze_job, answer_supplemental_questions, generate_application_package
 from .services.pdf import markdown_to_pdf
@@ -195,7 +195,9 @@ EMAIL_STATUS_RANK = {
 }
 
 EMAIL_STATUS_MIN_CLASSIFICATION_CONFIDENCE = 0.78
-EMAIL_STATUS_MIN_MATCH_CONFIDENCE = 0.55
+EMAIL_STATUS_MIN_MATCH_CONFIDENCE = 0.70
+EMAIL_DISPLAY_MIN_MATCH_CONFIDENCE = 0.55
+EMAIL_METADATA_REFRESH_LIMIT = 500
 
 JOB_LIST_VIEWS = {
     JOB_LIFECYCLE_ACTIVE,
@@ -241,6 +243,78 @@ def _email_suggested_status(message: Any) -> str:
     if float(getattr(message, "match_confidence", 0.0) or 0.0) < EMAIL_STATUS_MIN_MATCH_CONFIDENCE:
         return ""
     return EMAIL_STATUS_CLASSIFICATIONS.get(str(getattr(message, "classification", "") or ""), "")
+
+
+def _email_has_display_match(message: dict[str, Any]) -> bool:
+    return (
+        bool(message.get("job_id"))
+        and float(message.get("match_confidence") or 0.0) >= EMAIL_DISPLAY_MIN_MATCH_CONFIDENCE
+        and bool(str(message.get("match_reason") or "").strip())
+    )
+
+
+def _email_rows_to_dicts(rows: Any) -> list[dict[str, Any]]:
+    messages = rows_to_dicts(rows)
+    for message in messages:
+        if _email_has_display_match(message):
+            continue
+        message["job_id"] = None
+        message["job_title"] = ""
+        message["job_company"] = ""
+        message["match_confidence"] = 0.0
+        message["match_reason"] = ""
+    return messages
+
+
+def _refresh_email_review_metadata(conn) -> int:
+    jobs = rows_to_dicts(
+        conn.execute(
+            "SELECT id, title, company FROM jobs WHERE lifecycle_state <> ?",
+            (JOB_LIFECYCLE_TRASH,),
+        ).fetchall()
+    )
+    rows = rows_to_dicts(
+        conn.execute(
+            """
+            SELECT id, subject, sender, raw_excerpt
+            FROM emails
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (EMAIL_METADATA_REFRESH_LIMIT,),
+        ).fetchall()
+    )
+    for row in rows:
+        body = str(row.get("raw_excerpt") or "")
+        classification, confidence, summary = classify(
+            str(row.get("subject") or ""),
+            body,
+            str(row.get("sender") or ""),
+        )
+        matched = match_job(
+            str(row.get("subject") or ""),
+            body,
+            str(row.get("sender") or ""),
+            jobs,
+        )
+        conn.execute(
+            """
+            UPDATE emails
+            SET job_id = ?, classification = ?, confidence = ?,
+                match_confidence = ?, match_reason = ?, summary = ?
+            WHERE id = ?
+            """,
+            (
+                matched.job_id,
+                classification,
+                confidence,
+                matched.confidence,
+                matched.reason,
+                summary,
+                int(row["id"]),
+            ),
+        )
+    return len(rows)
 
 
 def _should_apply_email_status(current_status: str, suggested_status: str) -> bool:
@@ -408,6 +482,8 @@ def _build_startup_status(initialize: bool = False) -> dict[str, Any]:
                 init_db()
             database_ready = True
             with get_db() as conn:
+                if initialize:
+                    _refresh_email_review_metadata(conn)
                 profile = _profile(conn)
                 profile_is_default = _is_default_profile(str(profile.get("content") or ""))
                 counts = _runtime_counts(conn)
@@ -456,15 +532,22 @@ def _job_details(conn, job_id: int) -> dict[str, Any]:
         (job_id,),
     ).fetchall()
     emails = conn.execute(
-        "SELECT * FROM emails WHERE job_id = ? ORDER BY received_at DESC, id DESC",
-        (job_id,),
+        """
+        SELECT *
+        FROM emails
+        WHERE job_id = ?
+          AND match_confidence >= ?
+          AND COALESCE(match_reason, '') <> ''
+        ORDER BY received_at DESC, id DESC
+        """,
+        (job_id, EMAIL_DISPLAY_MIN_MATCH_CONFIDENCE),
     ).fetchall()
     artifacts = conn.execute(
         "SELECT * FROM application_artifacts WHERE job_id = ? ORDER BY created_at DESC, id DESC",
         (job_id,),
     ).fetchall()
     job["events"] = rows_to_dicts(events)
-    job["emails"] = rows_to_dicts(emails)
+    job["emails"] = _email_rows_to_dicts(emails)
     job["artifacts"] = rows_to_dicts(artifacts)
     return job
 
@@ -1336,7 +1419,7 @@ def email_sync() -> dict[str, Any]:
                         message.message_id,
                     ),
                 )
-        recent = rows_to_dicts(
+        recent = _email_rows_to_dicts(
             conn.execute(
                 """
                 SELECT e.*, j.title AS job_title, j.company AS job_company
@@ -1353,7 +1436,7 @@ def email_sync() -> dict[str, Any]:
 @app.get("/api/emails")
 def list_emails() -> list[dict[str, Any]]:
     with get_db() as conn:
-        return rows_to_dicts(
+        return _email_rows_to_dicts(
             conn.execute(
                 """
                 SELECT e.*, j.title AS job_title, j.company AS job_company

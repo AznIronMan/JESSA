@@ -2,7 +2,15 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.2.0`
+Current version: `3.2.1`
+
+## v3.2.1 Scope
+
+- Reduced email-sync false positives from newsletters, job-alert digests, retail notices, and generic alerts.
+- Tightened email-to-job matching so title-only overlaps no longer guess a job.
+- Raised the match-confidence gate for automatic email-driven status changes.
+- Hid legacy zero-confidence email links from job detail and email-list views.
+- Re-reviewed stored email metadata at startup with the stricter classifier without applying status changes.
 
 ## v3.2 Scope
 
@@ -313,7 +321,7 @@ Resume-source rules belong in the Core Profile. Use them to identify the primary
 
 ### Email
 
-`Sync Inbox` checks recent inbox messages, classifies job-search mail, and links messages to jobs by company/title when possible. Linked messages include match confidence and the reason they matched. When both the email classification and job match are high confidence, JESSA can advance status from application confirmation, assessment, interview, and rejection emails. Rejection emails use the existing terminal-status archive behavior. `Test SMTP` only verifies login; JESSA does not auto-send email.
+`Sync Inbox` checks recent inbox messages, classifies job-search mail, and links messages to jobs only when there is concrete company or sender evidence. Obvious newsletters, retail notices, and job-alert digests are ignored during new syncs. Linked messages include match confidence and the reason they matched. Title-only overlaps are left unmatched instead of guessing. When both the email classification and job match are high confidence, JESSA can advance status from application confirmation, assessment, interview, and rejection emails. Rejection emails use the existing terminal-status archive behavior. `Test SMTP` only verifies login; JESSA does not auto-send email.
 
 ## Data Model
 
@@ -348,6 +356,7 @@ This project uses semantic versioning.
 - `3.0.0`: portability release that removes hardcoded personal defaults and starts new databases from generic candidate templates.
 - `3.1.0`: setup/onboarding and multi-provider LLM configuration improvements.
 - `3.2.0`: settings UI improvements that preserve the existing data model.
+- `3.2.1`: email false-positive reduction that preserves the existing data model.
 
 ## Roadmap
 
@@ -358,6 +367,16 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.2.1
+
+- Added bulk/newsletter/job-alert guards to email classification and matching.
+- Required company or sender evidence before an email can link to a job.
+- Kept title-only application notices unmatched instead of selecting a likely wrong job.
+- Raised automatic email status updates to require stronger job-match confidence.
+- Hid legacy zero-confidence email links from email and job-detail views.
+- Refreshed existing stored email classifications and match metadata at startup without triggering status automation.
+- Added focused email classifier and job-match regression tests.
 
 ### 3.2.0
 
