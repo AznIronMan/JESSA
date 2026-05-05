@@ -8,6 +8,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from .. import config
+from ..defaults import DEFAULT_SYSTEM_PROMPT
 
 
 class SalaryTarget(BaseModel):
@@ -22,7 +23,7 @@ class JobAnalysis(BaseModel):
     interview_odds: Literal["Low", "Medium", "High", "Medium-High", "Medium-Low"]
     interview_confidence: float = Field(ge=0, le=1)
     salary_target: SalaryTarget
-    resume_base: Literal["DevSecOps", "Director", "Unabridged"]
+    resume_base: str = "Core Profile"
     recommendation: Literal["Apply", "Maybe", "Skip"]
     analysis_summary: str
     top_reasons: list[str]
@@ -58,6 +59,51 @@ def _client() -> OpenAI:
     if not config.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
     return OpenAI(api_key=config.OPENAI_API_KEY)
+
+
+def _extract_profile_field(profile: str, labels: tuple[str, ...]) -> str:
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    pattern = re.compile(
+        rf"^[ \t]*(?:[-*][ \t]*)?(?:{label_pattern})[ \t]*:[ \t]*(.+?)[ \t]*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    match = pattern.search(profile)
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    if value.lower() in {"tbd", "todo", "unknown", "not specified", "n/a"}:
+        return ""
+    return value
+
+
+def _candidate_context(profile: str) -> dict[str, str]:
+    formal_name = _extract_profile_field(profile, ("Formal name", "Formal", "Legal name", "Full name"))
+    preferred_name = _extract_profile_field(profile, ("Preferred name", "Preferred", "Informal name", "Informal"))
+    signature = _extract_profile_field(profile, ("Signature", "Document signature", "Cover letter signature"))
+    work_authorization = _extract_profile_field(profile, ("Work authorization", "Authorization", "Eligibility"))
+    location = _extract_profile_field(profile, ("Location", "Base location"))
+    display_name = preferred_name or formal_name
+    document_name = formal_name or preferred_name or "Candidate"
+    return {
+        "display_name": display_name or "the candidate",
+        "document_name": document_name,
+        "signature": signature or document_name,
+        "work_authorization": work_authorization,
+        "location": location,
+    }
+
+
+def _candidate_possessive(candidate: dict[str, str]) -> str:
+    name = candidate.get("display_name") or "the candidate"
+    if name == "the candidate":
+        return "the candidate's"
+    suffix = "'" if name.endswith("s") else "'s"
+    return f"{name}{suffix}"
+
+
+def _task_system_prompt(system_prompt: str, task: str) -> str:
+    base = (system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
+    return f"{base}\n\nTask: {task.strip()}"
 
 
 def _fallback_score(job: dict, profile: str) -> JobAnalysis:
@@ -98,7 +144,7 @@ def _fallback_score(job: dict, profile: str) -> JobAnalysis:
     else:
         band = "Underqualified"
         recommendation = "Maybe"
-    resume_base = "Director" if re.search(r"\b(director|manager|head of|itsm)\b", text) else "DevSecOps"
+    resume_base = "Leadership" if re.search(r"\b(director|manager|head of|lead|principal)\b", text) else "Technical"
     return JobAnalysis(
         match_score=score,
         qualification_band=band,  # type: ignore[arg-type]
@@ -109,28 +155,33 @@ def _fallback_score(job: dict, profile: str) -> JobAnalysis:
             floor="Set manually",
             basis="Heuristic fallback; OpenAI analysis was not available.",
         ),
-        resume_base=resume_base,  # type: ignore[arg-type]
+        resume_base=resume_base,
         recommendation=recommendation,  # type: ignore[arg-type]
         analysis_summary="Heuristic analysis only. Configure OpenAI or rerun analysis for full scoring.",
         top_reasons=hits[:5] or ["Job text imported successfully."],
         risks=["LLM analysis unavailable; verify requirements manually."],
         keyword_gaps=[],
-        suggested_angle="Lead with the strongest matching senior cloud, security, infrastructure, and leadership proof.",
+        suggested_angle="Lead with the strongest matching proof from the candidate profile.",
         tailored_resume_notes="Run OpenAI analysis to generate tailored resume notes.",
         cover_letter="Run OpenAI analysis to generate a cover letter.",
     )
 
 
-def analyze_job(job: dict, profile: str) -> JobAnalysis:
+def analyze_job(job: dict, profile: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> JobAnalysis:
     if not config.OPENAI_API_KEY:
         return _fallback_score(job, profile)
 
-    system = (
-        "You are J.E.S.S.A., Geoff Clark's career assistant. Score job fit with a strict, "
-        "evidence-based rubric. Do not invent experience. Push back on weak-fit roles. "
-        "Use the candidate profile as the source of truth. Return concise, practical output."
+    candidate = _candidate_context(profile)
+    system = _task_system_prompt(
+        system_prompt,
+        (
+            "Score job fit with a strict, evidence-based rubric. Do not invent experience. "
+            "Push back on weak-fit roles. Use the candidate profile as the source of truth. "
+            "Return concise, practical output."
+        ),
     )
     user = {
+        "candidate_context": candidate,
         "candidate_profile": profile[:45000],
         "job": {
             "title": job.get("title", ""),
@@ -150,11 +201,11 @@ def analyze_job(job: dict, profile: str) -> JobAnalysis:
             "compensation_fit": "5%",
         },
         "instructions": [
-            "Treat Director and DevSecOps resume history as the preferred current history. Treat unabridged history as context/detail only.",
+            "Honor any resume-source and positioning rules in the candidate profile.",
             "Estimate salary target from posted salary first; otherwise use title, seniority, remote/location, clearance, and contract/full-time hints.",
             "Use Underqualified only when required credentials/domain/hands-on experience are missing.",
             "Use Overqualified for helpdesk, tier 1/2, desktop-only, low-comp, or low-growth roles.",
-            "Generate one cover letter draft in Geoff's voice, no generic resume padding.",
+            f"Generate one cover letter draft in {_candidate_possessive(candidate)} voice, no generic resume padding.",
             "Generate resume tailoring notes, not a full rewritten resume.",
         ],
     }
@@ -185,14 +236,15 @@ def analyze_job(job: dict, profile: str) -> JobAnalysis:
 def _fallback_package(job: dict, profile: str) -> ApplicationPackage:
     title = job.get("title") or "Target Role"
     company = job.get("company") or "Target Company"
-    resume_title = f"Geoffrey Alan Clark - {title} Resume"
-    cover_title = f"Geoffrey Alan Clark - {company} Cover Letter"
+    candidate = _candidate_context(profile)
+    document_name = candidate["document_name"]
+    resume_title = f"{document_name} - {title} Resume"
+    cover_title = f"{document_name} - {company} Cover Letter"
     resume = (
         f"# {resume_title}\n\n"
-        "US Citizen | Active Secret Clearance | CompTIA Security+ (Active)\n\n"
         "## Tailoring Required\n\n"
         "OpenAI package generation was unavailable. Use the Core Profile tab plus the existing "
-        "DevSecOps or Director resume as the source, then tailor the summary and first-page bullets "
+        "resume/source rules as the source, then tailor the summary and first-page bullets "
         f"toward {title} at {company}.\n\n"
         "## Job Context\n\n"
         f"- Title: {title}\n"
@@ -202,11 +254,11 @@ def _fallback_package(job: dict, profile: str) -> ApplicationPackage:
     cover = (
         f"# {cover_title}\n\n"
         "Dear Hiring Team,\n\n"
-        f"I am applying for the {title} role at {company}. My background combines senior cloud, "
-        "DevSecOps, infrastructure leadership, healthcare IT, and federal delivery experience, "
-        "including active Secret clearance and current Security+ certification.\n\n"
+        f"I am applying for the {title} role at {company}. My background includes the experience, "
+        "skills, and qualifications outlined in my core profile, and I would tailor the strongest "
+        "relevant proof points to your requirements after reviewing the job details.\n\n"
         "I would welcome the opportunity to discuss where my background maps to your current needs.\n\n"
-        "Geoffrey Alan Clark\n"
+        f"{candidate['signature']}\n"
     )
     return ApplicationPackage(
         resume_title=resume_title,
@@ -217,17 +269,26 @@ def _fallback_package(job: dict, profile: str) -> ApplicationPackage:
     )
 
 
-def generate_application_package(job: dict, profile: str, analysis: dict | None = None) -> ApplicationPackage:
+def generate_application_package(
+    job: dict,
+    profile: str,
+    analysis: dict | None = None,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+) -> ApplicationPackage:
     if not config.OPENAI_API_KEY:
         return _fallback_package(job, profile)
 
-    system = (
-        "You are J.E.S.S.A., Geoff Clark's resume and cover letter assistant. Generate application "
-        "materials that are truthful, ATS-clean, senior, direct, and specific to the job. Do not invent "
-        "experience. Use Director and DevSecOps resume history as the preferred current history; use "
-        "unabridged details only for context or missing older detail."
+    candidate = _candidate_context(profile)
+    system = _task_system_prompt(
+        system_prompt,
+        (
+            "Generate resume and cover letter materials that are truthful, ATS-clean, senior, direct, "
+            "and specific to the job. Do not invent experience. Honor any resume-source and positioning "
+            "rules in the candidate profile."
+        ),
     )
     user = {
+        "candidate_context": candidate,
         "candidate_profile": profile[:55000],
         "job": {
             "title": job.get("title", ""),
@@ -240,9 +301,9 @@ def generate_application_package(job: dict, profile: str, analysis: dict | None 
         "analysis": analysis or {},
         "instructions": [
             "Return a full tailored resume in clean Markdown.",
-            "Keep the canonical timeline and titles intact.",
-            "Resume header must use Geoffrey Alan Clark and include US Citizen, Active Secret Clearance, CompTIA Security+ active.",
-            "Prefer DevSecOps resume positioning for cloud/platform/SRE/security roles; Director positioning for IT leadership/ITSM/infrastructure management roles.",
+            "Keep the candidate's canonical timeline and titles intact.",
+            "Resume header must use candidate_context.document_name and only include contact, credential, authorization, clearance, or certification details present in the candidate profile.",
+            "Choose the resume positioning that best matches the job and the candidate profile rules.",
             "No generic filler, no invented technologies, no inflated dates or titles.",
             "Return a matching cover letter in clean Markdown.",
             "Keep both documents ready for PDF rendering.",
@@ -293,16 +354,22 @@ def answer_supplemental_questions(
     profile: str,
     questions_text: str,
     application_artifacts: list[dict] | None = None,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> SupplementalAnswers:
     if not config.OPENAI_API_KEY:
         return _fallback_supplemental(job, questions_text)
 
-    system = (
-        "You are J.E.S.S.A., answering job application supplemental questions as Geoff Clark. "
-        "Answers must be truthful, concise, paste-ready, and grounded in the candidate profile and "
-        "the generated application materials. Say No when the truth is No. Do not invent experience."
+    candidate = _candidate_context(profile)
+    system = _task_system_prompt(
+        system_prompt,
+        (
+            "Answer job application supplemental questions for the candidate. Answers must be truthful, "
+            "concise, paste-ready, and grounded in the candidate profile and generated application "
+            "materials. Say No when the truth is No. Do not invent experience."
+        ),
     )
     user = {
+        "candidate_context": candidate,
         "candidate_profile": profile[:45000],
         "job": {
             "title": job.get("title", ""),
@@ -316,7 +383,7 @@ def answer_supplemental_questions(
             "Preserve the question text.",
             "Answer in first person when the question is candidate-facing.",
             "For salary, give a direct range and short rationale.",
-            "For work authorization, Geoff is a US Citizen and does not require sponsorship.",
+            "For work authorization, answer only from candidate_context or the candidate profile; mark needs_review=true if it is not documented.",
             "For availability, use immediate availability unless the question requires a date.",
             "Mark needs_review=true if the question asks for information not present in the profile.",
         ],

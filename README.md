@@ -1,15 +1,24 @@
 # JESSA
 
-JESSA is a local job-search workstation for Geoff Clark. It imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against the editable core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
+JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
 
-Current version: `2.4.0`
+Current version: `3.0.0`
+
+## v3.0 Scope
+
+- Portable candidate profile defaults with no hardcoded personal identity.
+- DB-backed default JESSA system prompt in `app_prompts`.
+- Existing user-specific profile content remains in `core_profile`; fresh databases start with a generic candidate profile template.
+- Removed the deprecated `jessa_gpt_instructions.txt` file from runtime seeding.
+- Cold-start PostgreSQL initialization can create the configured database when the configured user has permission, then create all runtime tables from scratch.
+- Git workflow targets `main` on `origin` at `https://github.com/AznIronMan/JESSA.git`.
 
 ## v2.0 Scope
 
 - Local FastAPI web app with static HTML/CSS/JS.
 - PostgreSQL persistence for all runtime application data.
 - One-time legacy SQLite import from `data/jessa.sqlite3` through `scripts/migrate_sqlite_to_postgres.py`.
-- Editable core profile seeded from `jessa_gpt_instructions.txt`.
+- Editable core profile seeded from a generic built-in template or from an optional `JESSA_PROFILE_SOURCE` file.
 - Job import from URL with HTTP + BeautifulSoup extraction.
 - Optional rendered-page import through Playwright.
 - Manual pasted-text import fallback.
@@ -77,7 +86,7 @@ Current version: `2.4.0`
 - LinkedIn job URL imports use a local, visible, persistent browser profile.
 - LinkedIn job imports fall back to rendered visible text when LinkedIn's static selectors do not expose the top-card fields.
 - LinkedIn URLs automatically switch the import method to `LinkedIn` in the UI.
-- Geoff's LinkedIn profile can be cached from a profile URL or saved from pasted profile text.
+- The candidate's LinkedIn profile can be cached from a profile URL or saved from pasted profile text.
 - LinkedIn profile caching captures the main profile plus supported detail sections such as experience, education, certifications, skills, projects, volunteering, recommendations, and honors.
 - Cached LinkedIn profile content is appended to the candidate context for job analysis, application package generation, and supplemental answers.
 
@@ -180,9 +189,11 @@ EMAIL_FROM=$EMAIL_USER
 Optional app path overrides:
 
 ```bash
-JESSA_PROFILE_SOURCE=jessa_gpt_instructions.txt
+JESSA_PROFILE_SOURCE=
 JESSA_RESUME_DIR=~/Documents/job_hunting
 ```
+
+`JESSA_PROFILE_SOURCE` is optional and only seeds `core_profile` when the configured PostgreSQL database has no profile row yet. Leave it blank for the portable built-in starter profile.
 
 LinkedIn support:
 
@@ -259,9 +270,9 @@ Paste application questions into `Supplemental Questions` and click `Generate An
 
 The core profile is the source of truth for future scoring and resume generation. Fix dates, titles, canonical bullets, and career rules here first. Every save increments the profile version.
 
-The LinkedIn Profile cache in this tab stores Geoff's current LinkedIn profile text separately from the canonical core profile. Use `Cache from URL` to open the persistent LinkedIn browser. If LinkedIn asks you to sign in, complete sign-in and click `I'm signed in, continue` in the JESSA overlay. Then click `Capture profile now`. JESSA expands visible profile text, visits supported `/details/...` profile sections, and refuses to save an empty or too-small browser capture. You can also paste profile text and use `Save Cache`. JESSA includes this cached profile as supporting context during job analysis and document generation.
+The LinkedIn Profile cache in this tab stores the candidate's current LinkedIn profile text separately from the canonical core profile. Use `Cache from URL` to open the persistent LinkedIn browser. If LinkedIn asks you to sign in, complete sign-in and click `I'm signed in, continue` in the JESSA overlay. Then click `Capture profile now`. JESSA expands visible profile text, visits supported `/details/...` profile sections, and refuses to save an empty or too-small browser capture. You can also paste profile text and use `Save Cache`. JESSA includes this cached profile as supporting context during job analysis and document generation.
 
-Resume-source rule: the Director and DevSecOps resumes are the preferred current version of the career history. The unabridged resume is retained for older detail and context, not as the primary canonical source when there is a conflict.
+Resume-source rules belong in the Core Profile. Use them to identify the primary resume/source, secondary resume/source, do-not-use titles or claims, and any positioning rules for different role types.
 
 ### Email
 
@@ -272,12 +283,16 @@ Resume-source rule: the Director and DevSecOps resumes are the preferred current
 PostgreSQL tables:
 
 - `core_profile`
+- `app_prompts`
 - `jobs`
 - `job_events`
 - `emails`
 - `application_artifacts`
+- `linkedin_profile_cache`
 
 Generated resumes, cover letters, and supplemental answers are stored in `application_artifacts` with version numbers and submitted timestamps. `job_events` records status changes and document lifecycle actions.
+
+The default JESSA system prompt is stored in `app_prompts` under the `jessa_system` key. Candidate-specific facts, career rules, identity, authorization, credentials, and writing preferences belong in `core_profile`, not in source code.
 
 Email match metadata is stored on `emails` with `match_confidence`, `match_reason`, and `status_action`. These columns are added on startup when needed.
 
@@ -293,6 +308,7 @@ This project uses semantic versioning.
 - `1.x.0`: additive features that preserve the local database shape or migrate it safely.
 - `2.0.0`: breaking schema or workflow changes.
 - `2.x.0`: additive features on the PostgreSQL workflow with safe schema migration.
+- `3.0.0`: portability release that removes hardcoded personal defaults and starts new databases from generic candidate templates.
 
 ## Roadmap
 
@@ -303,6 +319,17 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.0.0
+
+- Expanded JESSA as Job Engineering Smart Search Assistant in docs and default prompt text.
+- Removed hardcoded candidate identity from LLM prompts, fallback package titles, fallback cover letters, UI placeholder text, and README usage guidance.
+- Added `jessa_app/defaults.py` with a portable default system prompt and generic core profile template.
+- Added the `app_prompts` table and default `jessa_system` prompt seeding.
+- Changed fresh database startup to create the configured PostgreSQL database when permitted and then create all runtime tables from scratch.
+- Deprecated and removed `jessa_gpt_instructions.txt`; existing personal profile data should live in `core_profile`.
+- Updated legacy SQLite import handling for newer optional runtime tables and columns.
+- Added local ignored `AGENTS.md` workflow guidance and pointed Git workflow at the GitHub `main` branch.
 
 ### 2.4.0
 

@@ -21,6 +21,7 @@ from .db import (
     JOB_LIFECYCLE_TRASH,
     TRASH_RETENTION_HOURS,
     get_db,
+    get_app_prompt,
     init_db,
     log_event,
     purge_expired_trashed_jobs,
@@ -312,6 +313,11 @@ def _profile_context(conn) -> tuple[dict[str, Any], str]:
     return profile, profile_text
 
 
+def _llm_context(conn) -> tuple[dict[str, Any], str, str]:
+    profile, profile_text = _profile_context(conn)
+    return profile, profile_text, get_app_prompt(conn)
+
+
 def _get_job(conn, job_id: int) -> dict[str, Any]:
     purge_expired_trashed_jobs(conn)
     row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
@@ -538,7 +544,7 @@ async def fetch_cached_linkedin_profile(request: LinkedInProfileFetch) -> dict[s
         with get_db() as conn:
             url = str(_linkedin_profile(conn).get("url") or "").strip()
     if not url:
-        raise HTTPException(status_code=400, detail="Provide Geoff's LinkedIn profile URL first.")
+        raise HTTPException(status_code=400, detail="Provide the candidate's LinkedIn profile URL first.")
     try:
         snapshot = await fetch_linkedin_profile(url)
     except Exception as exc:
@@ -858,8 +864,8 @@ def recover_job(job_id: int) -> dict[str, Any]:
 def analyze(job_id: int) -> dict[str, Any]:
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile, profile_text = _profile_context(conn)
-        result = analyze_job(job, profile_text)
+        profile, profile_text, app_prompt = _llm_context(conn)
+        result = analyze_job(job, profile_text, app_prompt)
         payload = result.model_dump()
         conn.execute(
             """
@@ -889,7 +895,7 @@ def analyze(job_id: int) -> dict[str, Any]:
         )
         log_event(conn, job_id, "analyzed", f"{payload['match_score']}% {payload['recommendation']}")
         updated_job = _get_job(conn, job_id)
-        package = generate_application_package(updated_job, profile_text, payload)
+        package = generate_application_package(updated_job, profile_text, payload, app_prompt)
         resume_id = _insert_artifact(
             conn,
             job_id,
@@ -923,8 +929,13 @@ def analyze(job_id: int) -> dict[str, Any]:
 def generate_package(job_id: int) -> dict[str, Any]:
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile, profile_text = _profile_context(conn)
-        package = generate_application_package(job, profile_text, job.get("analysis_json") if isinstance(job.get("analysis_json"), dict) else None)
+        profile, profile_text, app_prompt = _llm_context(conn)
+        package = generate_application_package(
+            job,
+            profile_text,
+            job.get("analysis_json") if isinstance(job.get("analysis_json"), dict) else None,
+            app_prompt,
+        )
         resume_id = _insert_artifact(
             conn,
             job_id,
@@ -955,7 +966,7 @@ def generate_supplemental(job_id: int, request: SupplementalRequest) -> dict[str
         raise HTTPException(status_code=400, detail="Paste at least one supplemental question.")
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile, profile_text = _profile_context(conn)
+        profile, profile_text, app_prompt = _llm_context(conn)
         artifacts = rows_to_dicts(
             conn.execute(
                 """
@@ -968,7 +979,7 @@ def generate_supplemental(job_id: int, request: SupplementalRequest) -> dict[str
                 (job_id,),
             ).fetchall()
         )
-        answers = answer_supplemental_questions(job, profile_text, request.questions_text, artifacts)
+        answers = answer_supplemental_questions(job, profile_text, request.questions_text, artifacts, app_prompt)
         artifact_id = _insert_artifact(
             conn,
             job_id,

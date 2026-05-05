@@ -1,3 +1,3 @@
-"""JESSA local job-search workstation."""
+"""JESSA portable job-search workstation."""
 
-__version__ = "2.4.0"
+__version__ = "3.0.0"

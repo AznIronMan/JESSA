@@ -8,12 +8,15 @@ from typing import Any, Iterator, Mapping, Sequence
 
 try:
     import psycopg
+    from psycopg import sql
     from psycopg.rows import dict_row
 except ImportError:  # pragma: no cover - exercised only before dependencies are installed.
     psycopg = None
+    sql = None
     dict_row = None
 
 from . import config
+from .defaults import DEFAULT_APP_PROMPT_KEY, DEFAULT_CORE_PROFILE, DEFAULT_SYSTEM_PROMPT
 
 
 class DatabaseConfigError(RuntimeError):
@@ -72,6 +75,33 @@ def _connection_kwargs(dbname: str | None = None) -> dict[str, Any]:
 def connect_raw(dbname: str | None = None):
     _require_psycopg()
     return psycopg.connect(**_connection_kwargs(dbname))
+
+
+def ensure_database_exists() -> bool:
+    _require_psycopg()
+    try:
+        conn = connect_raw(config.POSTGRES_DB_NAME)
+    except psycopg.errors.InvalidCatalogName:
+        if sql is None:
+            raise
+        maintenance = connect_raw(config.POSTGRES_MAINTENANCE_DB)
+        try:
+            maintenance.autocommit = True
+            row = maintenance.execute(
+                "SELECT 1 AS exists FROM pg_database WHERE datname = %s",
+                (config.POSTGRES_DB_NAME,),
+            ).fetchone()
+            if row:
+                return False
+            maintenance.execute(
+                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(config.POSTGRES_DB_NAME))
+            )
+            return True
+        finally:
+            maintenance.close()
+    else:
+        conn.close()
+        return False
 
 
 def _translate_placeholders(query: str) -> str:
@@ -164,14 +194,10 @@ def _ensure_column(conn: Connection, table: str, name: str, definition: str) -> 
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
-def _read_profile_seed(path: Path) -> str:
-    if path.exists():
+def _read_profile_seed(path: Path | None) -> str:
+    if path and path.exists():
         return path.read_text(encoding="utf-8", errors="replace")
-    return (
-        "# JESSA Core Profile\n\n"
-        "Add Geoff's canonical resume/profile data here. Future generated resumes "
-        "and job analyses should use this as the source of truth.\n"
-    )
+    return DEFAULT_CORE_PROFILE
 
 
 SCHEMA_STATEMENTS = (
@@ -180,6 +206,13 @@ SCHEMA_STATEMENTS = (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         content TEXT NOT NULL,
         version INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS app_prompts (
+        prompt_key TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
     """,
@@ -314,7 +347,37 @@ def _archive_existing_terminal_jobs(conn: Connection) -> None:
     )
 
 
+def get_app_prompt(conn: Connection, prompt_key: str = DEFAULT_APP_PROMPT_KEY) -> str:
+    row = conn.execute("SELECT content FROM app_prompts WHERE prompt_key = ?", (prompt_key,)).fetchone()
+    if row and str(row.get("content") or "").strip():
+        return str(row["content"])
+    return DEFAULT_SYSTEM_PROMPT
+
+
+def set_app_prompt(conn: Connection, content: str, prompt_key: str = DEFAULT_APP_PROMPT_KEY) -> dict[str, Any]:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO app_prompts (prompt_key, content, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT (prompt_key) DO UPDATE SET
+            content = EXCLUDED.content,
+            updated_at = EXCLUDED.updated_at
+        """,
+        (prompt_key, content, now),
+    )
+    row = conn.execute("SELECT * FROM app_prompts WHERE prompt_key = ?", (prompt_key,)).fetchone()
+    return dict(row or {})
+
+
+def _seed_default_prompt(conn: Connection) -> None:
+    row = conn.execute("SELECT 1 FROM app_prompts WHERE prompt_key = ?", (DEFAULT_APP_PROMPT_KEY,)).fetchone()
+    if not row:
+        set_app_prompt(conn, DEFAULT_SYSTEM_PROMPT)
+
+
 def init_db() -> None:
+    ensure_database_exists()
     with get_db() as conn:
         for statement in SCHEMA_STATEMENTS:
             conn.execute(statement)
@@ -330,6 +393,7 @@ def init_db() -> None:
         _ensure_column(conn, "application_artifacts", "source_profile_version", "INTEGER")
         for statement in JOB_LIFECYCLE_INDEX_STATEMENTS:
             conn.execute(statement)
+        _seed_default_prompt(conn)
         _archive_existing_terminal_jobs(conn)
         purge_expired_trashed_jobs(conn)
         exists = conn.execute("SELECT 1 FROM core_profile WHERE id = 1").fetchone()

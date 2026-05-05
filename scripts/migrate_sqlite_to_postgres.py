@@ -12,13 +12,14 @@ from typing import Any
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR))
 
-from psycopg import errors, sql  # noqa: E402
+from psycopg import sql  # noqa: E402
 
 from jessa_app import config, db  # noqa: E402
 
 
 TABLE_COLUMNS = {
     "core_profile": ("id", "content", "version", "updated_at"),
+    "app_prompts": ("prompt_key", "content", "updated_at"),
     "jobs": (
         "id",
         "source",
@@ -44,6 +45,11 @@ TABLE_COLUMNS = {
         "cover_letter",
         "resume_notes",
         "status_updated_at",
+        "lifecycle_state",
+        "archived_at",
+        "trashed_at",
+        "purge_after",
+        "previous_lifecycle_state",
         "created_at",
         "updated_at",
     ),
@@ -57,6 +63,9 @@ TABLE_COLUMNS = {
         "received_at",
         "classification",
         "confidence",
+        "match_confidence",
+        "match_reason",
+        "status_action",
         "summary",
         "raw_excerpt",
         "created_at",
@@ -75,10 +84,18 @@ TABLE_COLUMNS = {
         "created_at",
         "updated_at",
     ),
+    "linkedin_profile_cache": ("id", "url", "title", "content", "fetched_at", "updated_at"),
 }
 
 SEQUENCE_TABLES = ("jobs", "job_events", "emails", "application_artifacts")
 APPLICATION_TABLES = ("jobs", "job_events", "emails", "application_artifacts")
+CONFLICT_COLUMNS = {
+    "app_prompts": ("prompt_key",),
+}
+TABLE_ORDER_COLUMNS = {
+    "app_prompts": "prompt_key",
+}
+COUNT_CHECK_TABLES = tuple(table for table in TABLE_COLUMNS if table != "app_prompts")
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,27 +117,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensure_target_database() -> bool:
-    try:
-        conn = db.connect_raw(config.POSTGRES_DB_NAME)
-    except errors.InvalidCatalogName:
-        maintenance = db.connect_raw(config.POSTGRES_MAINTENANCE_DB)
-        try:
-            maintenance.autocommit = True
-            row = maintenance.execute(
-                "SELECT 1 AS exists FROM pg_database WHERE datname = %s",
-                (config.POSTGRES_DB_NAME,),
-            ).fetchone()
-            if row:
-                return False
-            maintenance.execute(
-                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(config.POSTGRES_DB_NAME))
-            )
-            return True
-        finally:
-            maintenance.close()
-    else:
-        conn.close()
-        return False
+    return db.ensure_database_exists()
 
 
 def sqlite_connect(path: Path) -> sqlite3.Connection:
@@ -138,6 +135,20 @@ def validate_sqlite(conn: sqlite3.Connection) -> None:
         raise SystemExit(f"SQLite integrity check failed: {result}")
 
 
+def sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return bool(row)
+
+
+def sqlite_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not sqlite_table_exists(conn, table):
+        return set()
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
 def backup_sqlite(path: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_dir = path.parent / "backups"
@@ -148,7 +159,13 @@ def backup_sqlite(path: Path) -> Path:
 
 
 def sqlite_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    return {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in TABLE_COLUMNS}
+    counts: dict[str, int] = {}
+    for table in TABLE_COLUMNS:
+        if sqlite_table_exists(conn, table):
+            counts[table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        else:
+            counts[table] = 0
+    return counts
 
 
 def postgres_counts(conn: Any) -> dict[str, int]:
@@ -160,30 +177,47 @@ def postgres_counts(conn: Any) -> dict[str, int]:
 
 
 def table_rows(conn: sqlite3.Connection, table: str) -> list[dict[str, Any]]:
+    source_columns = sqlite_columns(conn, table)
+    if not source_columns:
+        return []
     columns = TABLE_COLUMNS[table]
-    column_sql = ", ".join(columns)
-    return [dict(row) for row in conn.execute(f"SELECT {column_sql} FROM {table} ORDER BY id").fetchall()]
+    available_columns = [column for column in columns if column in source_columns]
+    if not available_columns:
+        return []
+    column_sql = ", ".join(available_columns)
+    order_column = TABLE_ORDER_COLUMNS.get(table, "id")
+    order_sql = f" ORDER BY {order_column}" if order_column in source_columns else ""
+    rows: list[dict[str, Any]] = []
+    for row in conn.execute(f"SELECT {column_sql} FROM {table}{order_sql}").fetchall():
+        rows.append(dict(row))
+    return rows
 
 
 def upsert_rows(conn: Any, table: str, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
-    columns = TABLE_COLUMNS[table]
+    columns = tuple(column for column in TABLE_COLUMNS[table] if column in rows[0])
+    conflict_columns = CONFLICT_COLUMNS.get(table, ("id",))
+    if not all(column in columns for column in conflict_columns):
+        return
     assignments = [
         sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(column), sql.Identifier(column))
         for column in columns
-        if column != "id"
+        if column not in conflict_columns
     ]
+    if not assignments:
+        return
     statement = sql.SQL(
         """
         INSERT INTO {} ({})
         VALUES ({})
-        ON CONFLICT (id) DO UPDATE SET {}
+        ON CONFLICT ({}) DO UPDATE SET {}
         """
     ).format(
         sql.Identifier(table),
         sql.SQL(", ").join(sql.Identifier(column) for column in columns),
         sql.SQL(", ").join(sql.Placeholder() for _ in columns),
+        sql.SQL(", ").join(sql.Identifier(column) for column in conflict_columns),
         sql.SQL(", ").join(assignments),
     )
     for row in rows:
@@ -244,10 +278,12 @@ def main() -> int:
     finally:
         source.close()
 
-    if source_counts != target_counts:
+    source_check_counts = {table: source_counts[table] for table in COUNT_CHECK_TABLES}
+    target_check_counts = {table: target_counts[table] for table in COUNT_CHECK_TABLES}
+    if source_check_counts != target_check_counts:
         raise SystemExit(
             "Migration count mismatch. "
-            f"SQLite: {format_counts(source_counts)}; PostgreSQL: {format_counts(target_counts)}"
+            f"SQLite: {format_counts(source_check_counts)}; PostgreSQL: {format_counts(target_check_counts)}"
         )
 
     print("PostgreSQL database created: " + str(created))
