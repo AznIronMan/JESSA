@@ -40,10 +40,8 @@ then
   exit 1
 fi
 
-echo "Initializing PostgreSQL database..."
-.venv/bin/python -c 'from jessa_app.db import init_db; init_db()'
-
 echo "Starting JESSA on $HOST:$PORT"
+echo "Startup checks will report missing or invalid .env settings in the web UI."
 echo "Local access: http://127.0.0.1:$PORT"
 echo "LAN access: http://<this-mac-10.0.x.x-ip>:$PORT"
 exec .venv/bin/uvicorn jessa_app.main:app --host "$HOST" --port "$PORT"

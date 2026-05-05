@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Literal
+from typing import Literal, TypeVar
 
+import httpx
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -55,10 +56,22 @@ class SupplementalAnswers(BaseModel):
     markdown: str
 
 
-def _client() -> OpenAI:
-    if not config.OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not configured.")
-    return OpenAI(api_key=config.OPENAI_API_KEY)
+StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
+
+
+def _client(provider: dict[str, str]) -> OpenAI:
+    kwargs = {"api_key": provider["api_key"]}
+    if provider.get("base_url"):
+        kwargs["base_url"] = provider["base_url"]
+    return OpenAI(**kwargs)
+
+
+def _configured_providers() -> list[dict[str, str]]:
+    return config.configured_llm_providers()
+
+
+def _provider_label(provider: dict[str, str]) -> str:
+    return f"{provider['name']}:{provider['model']}"
 
 
 def _extract_profile_field(profile: str, labels: tuple[str, ...]) -> str:
@@ -104,6 +117,167 @@ def _candidate_possessive(candidate: dict[str, str]) -> str:
 def _task_system_prompt(system_prompt: str, task: str) -> str:
     base = (system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
     return f"{base}\n\nTask: {task.strip()}"
+
+
+def _json_user_payload(user: dict, model_cls: type[BaseModel]) -> str:
+    schema = model_cls.model_json_schema()
+    return (
+        "Return only valid JSON that conforms to this JSON Schema. "
+        "Do not include markdown fences, commentary, or extra keys.\n\n"
+        f"JSON Schema:\n{json.dumps(schema, ensure_ascii=False)}\n\n"
+        f"Request payload:\n{json.dumps(user, ensure_ascii=False)}"
+    )
+
+
+def _extract_json_object(text: str) -> dict:
+    value = text.strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE).strip()
+        value = re.sub(r"\s*```$", "", value).strip()
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        start = value.find("{")
+        end = value.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        parsed = json.loads(value[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM response was not a JSON object.")
+    return parsed
+
+
+def _response_output_text(response: object) -> str:
+    text = getattr(response, "output_text", None)
+    if text:
+        return str(text)
+    chunks: list[str] = []
+    for output in getattr(response, "output", []) or []:
+        for item in getattr(output, "content", []) or []:
+            item_text = getattr(item, "text", None)
+            if item_text:
+                chunks.append(str(item_text))
+    return "\n".join(chunks).strip()
+
+
+def _generate_openai_structured(
+    provider: dict[str, str],
+    system: str,
+    user: dict,
+    model_cls: type[StructuredModel],
+) -> StructuredModel:
+    response = _client(provider).responses.parse(
+        model=provider["model"],
+        input=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+        ],
+        text_format=model_cls,
+    )
+    for output in response.output:
+        if output.type != "message":
+            continue
+        for item in output.content:
+            parsed = getattr(item, "parsed", None)
+            if parsed:
+                return parsed
+    raise RuntimeError("OpenAI response did not contain parsed structured output.")
+
+
+def _generate_xai_structured(
+    provider: dict[str, str],
+    system: str,
+    user: dict,
+    model_cls: type[StructuredModel],
+) -> StructuredModel:
+    response = _client(provider).responses.create(
+        model=provider["model"],
+        input=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": _json_user_payload(user, model_cls)},
+        ],
+    )
+    return model_cls.model_validate(_extract_json_object(_response_output_text(response)))
+
+
+def _generate_gemini_structured(
+    provider: dict[str, str],
+    system: str,
+    user: dict,
+    model_cls: type[StructuredModel],
+) -> StructuredModel:
+    url = f"{provider['base_url']}/models/{provider['model']}:generateContent"
+    payload = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": _json_user_payload(user, model_cls)}]}],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "temperature": 0.2,
+        },
+    }
+    with httpx.Client(timeout=90) as client:
+        response = client.post(url, params={"key": provider["api_key"]}, json=payload)
+        response.raise_for_status()
+    data = response.json()
+    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    text = "\n".join(str(part.get("text", "")) for part in parts if part.get("text")).strip()
+    if not text:
+        raise RuntimeError("Gemini response did not contain text.")
+    return model_cls.model_validate(_extract_json_object(text))
+
+
+def _generate_claude_structured(
+    provider: dict[str, str],
+    system: str,
+    user: dict,
+    model_cls: type[StructuredModel],
+) -> StructuredModel:
+    url = f"{provider['base_url']}/v1/messages"
+    payload = {
+        "model": provider["model"],
+        "max_tokens": 6000,
+        "system": system,
+        "messages": [{"role": "user", "content": _json_user_payload(user, model_cls)}],
+    }
+    headers = {
+        "x-api-key": provider["api_key"],
+        "anthropic-version": config.CLAUDE_VERSION,
+        "content-type": "application/json",
+    }
+    with httpx.Client(timeout=90) as client:
+        response = client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+    data = response.json()
+    text = "\n".join(
+        str(item.get("text", ""))
+        for item in data.get("content", [])
+        if item.get("type") == "text" and item.get("text")
+    ).strip()
+    if not text:
+        raise RuntimeError("Claude response did not contain text.")
+    return model_cls.model_validate(_extract_json_object(text))
+
+
+def _generate_structured(system: str, user: dict, model_cls: type[StructuredModel]) -> StructuredModel:
+    providers = _configured_providers()
+    if not providers:
+        raise RuntimeError("No LLM provider is configured.")
+    failures: list[str] = []
+    for provider in providers:
+        try:
+            if provider["name"] == "openai":
+                return _generate_openai_structured(provider, system, user, model_cls)
+            if provider["name"] == "grok":
+                return _generate_xai_structured(provider, system, user, model_cls)
+            if provider["name"] == "gemini":
+                return _generate_gemini_structured(provider, system, user, model_cls)
+            if provider["name"] == "claude":
+                return _generate_claude_structured(provider, system, user, model_cls)
+            failures.append(f"{provider['name']}: unsupported provider")
+        except Exception as exc:
+            failures.append(f"{_provider_label(provider)} failed: {exc}")
+            continue
+    raise RuntimeError("; ".join(failures) or "All configured LLM providers failed.")
 
 
 def _fallback_score(job: dict, profile: str) -> JobAnalysis:
@@ -168,7 +342,7 @@ def _fallback_score(job: dict, profile: str) -> JobAnalysis:
 
 
 def analyze_job(job: dict, profile: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> JobAnalysis:
-    if not config.OPENAI_API_KEY:
+    if not _configured_providers():
         return _fallback_score(job, profile)
 
     candidate = _candidate_context(profile)
@@ -211,25 +385,10 @@ def analyze_job(job: dict, profile: str, system_prompt: str = DEFAULT_SYSTEM_PRO
     }
 
     try:
-        response = _client().responses.parse(
-            model=config.OPENAI_MODEL,
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-            ],
-            text_format=JobAnalysis,
-        )
-        for output in response.output:
-            if output.type != "message":
-                continue
-            for item in output.content:
-                parsed = getattr(item, "parsed", None)
-                if parsed:
-                    return parsed
-        return _fallback_score(job, profile)
+        return _generate_structured(system, user, JobAnalysis)
     except Exception as exc:
         fallback = _fallback_score(job, profile)
-        fallback.risks.insert(0, f"OpenAI analysis failed: {exc}")
+        fallback.risks.insert(0, f"LLM analysis failed: {exc}")
         return fallback
 
 
@@ -275,7 +434,7 @@ def generate_application_package(
     analysis: dict | None = None,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> ApplicationPackage:
-    if not config.OPENAI_API_KEY:
+    if not _configured_providers():
         return _fallback_package(job, profile)
 
     candidate = _candidate_context(profile)
@@ -310,25 +469,10 @@ def generate_application_package(
         ],
     }
     try:
-        response = _client().responses.parse(
-            model=config.OPENAI_MODEL,
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-            ],
-            text_format=ApplicationPackage,
-        )
-        for output in response.output:
-            if output.type != "message":
-                continue
-            for item in output.content:
-                parsed = getattr(item, "parsed", None)
-                if parsed:
-                    return parsed
-        return _fallback_package(job, profile)
+        return _generate_structured(system, user, ApplicationPackage)
     except Exception as exc:
         fallback = _fallback_package(job, profile)
-        fallback.notes = f"OpenAI package generation failed: {exc}"
+        fallback.notes = f"LLM package generation failed: {exc}"
         return fallback
 
 
@@ -356,7 +500,7 @@ def answer_supplemental_questions(
     application_artifacts: list[dict] | None = None,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> SupplementalAnswers:
-    if not config.OPENAI_API_KEY:
+    if not _configured_providers():
         return _fallback_supplemental(job, questions_text)
 
     candidate = _candidate_context(profile)
@@ -389,23 +533,8 @@ def answer_supplemental_questions(
         ],
     }
     try:
-        response = _client().responses.parse(
-            model=config.OPENAI_MODEL,
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-            ],
-            text_format=SupplementalAnswers,
-        )
-        for output in response.output:
-            if output.type != "message":
-                continue
-            for item in output.content:
-                parsed = getattr(item, "parsed", None)
-                if parsed:
-                    return parsed
-        return _fallback_supplemental(job, questions_text)
+        return _generate_structured(system, user, SupplementalAnswers)
     except Exception as exc:
         fallback = _fallback_supplemental(job, questions_text)
-        fallback.markdown = f"OpenAI supplemental answer generation failed: {exc}\n\n{fallback.markdown}"
+        fallback.markdown = f"LLM supplemental answer generation failed: {exc}\n\n{fallback.markdown}"
         return fallback

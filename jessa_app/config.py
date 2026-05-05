@@ -43,6 +43,14 @@ def normalize_model(model: str | None) -> str:
     return aliases.get(model.strip(), model.strip())
 
 
+def _env_first(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _parse_client_networks(value: str) -> tuple[ClientNetwork, ...]:
     networks: list[ClientNetwork] = []
     for item in value.split(","):
@@ -71,6 +79,28 @@ def _normalize_client_ip(host: str | None) -> ClientIP | None:
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = normalize_model(os.getenv("OPENAI_MODEL"))
+GEMINI_API_KEY = _env_first("GEMINI_API_KEY", "GOOGLE_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+GEMINI_BASE_URL = (
+    os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").strip().rstrip("/")
+    or "https://generativelanguage.googleapis.com/v1beta"
+)
+GROK_API_KEY = _env_first("GROK_API_KEY", "XAI_API_KEY")
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-4.3").strip() or "grok-4.3"
+GROK_BASE_URL = os.getenv("GROK_BASE_URL", "https://api.x.ai/v1").strip().rstrip("/") or "https://api.x.ai/v1"
+CLAUDE_API_KEY = _env_first("CLAUDE_API_KEY", "ANTHROPIC_API_KEY")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5").strip() or "claude-sonnet-4-5"
+CLAUDE_BASE_URL = (
+    os.getenv("CLAUDE_BASE_URL", "https://api.anthropic.com").strip().rstrip("/") or "https://api.anthropic.com"
+)
+CLAUDE_VERSION = os.getenv("CLAUDE_VERSION", "2023-06-01").strip() or "2023-06-01"
+LLM_PROVIDER_PRIORITY = tuple(
+    item.strip().lower()
+    for item in os.getenv("JESSA_LLM_PROVIDER_PRIORITY", "openai,claude,gemini,grok").split(",")
+    if item.strip()
+)
+if not LLM_PROVIDER_PRIORITY:
+    LLM_PROVIDER_PRIORITY = ("openai", "claude", "gemini", "grok")
 
 EMAIL_USER = os.getenv("EMAIL_USER", "").strip()
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD", "").strip()
@@ -154,3 +184,45 @@ def client_host_allowed(host: str | None) -> bool:
 
 def postgres_configured() -> bool:
     return bool(POSTGRES_HOST and POSTGRES_USER and POSTGRES_DB_NAME)
+
+
+def llm_provider_configs() -> dict[str, dict[str, str]]:
+    return {
+        "openai": {"api_key": OPENAI_API_KEY, "model": OPENAI_MODEL, "base_url": ""},
+        "gemini": {"api_key": GEMINI_API_KEY, "model": GEMINI_MODEL, "base_url": GEMINI_BASE_URL},
+        "grok": {"api_key": GROK_API_KEY, "model": GROK_MODEL, "base_url": GROK_BASE_URL},
+        "claude": {"api_key": CLAUDE_API_KEY, "model": CLAUDE_MODEL, "base_url": CLAUDE_BASE_URL},
+    }
+
+
+def configured_llm_providers() -> list[dict[str, str]]:
+    providers = llm_provider_configs()
+    ordered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for provider in LLM_PROVIDER_PRIORITY:
+        if provider in seen:
+            continue
+        seen.add(provider)
+        data = providers.get(provider)
+        if data and data["api_key"]:
+            ordered.append({"name": provider, **data})
+    return ordered
+
+
+def active_llm_provider() -> dict[str, str] | None:
+    providers = configured_llm_providers()
+    return providers[0] if providers else None
+
+
+def llm_provider_status() -> dict[str, dict[str, str | bool]]:
+    providers = llm_provider_configs()
+    active = active_llm_provider()
+    active_name = active["name"] if active else ""
+    return {
+        name: {
+            "configured": bool(data["api_key"]),
+            "active": name == active_name,
+            "model": data["model"],
+        }
+        for name, data in providers.items()
+    }

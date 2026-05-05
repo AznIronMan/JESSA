@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import json
 import re
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.requests import Request
 
-from . import __version__, config
+from . import __version__, config, db as db_module
 from .db import (
     AUTO_ARCHIVE_STATUSES,
+    DatabaseConfigError,
     JOB_LIFECYCLE_ACTIVE,
     JOB_LIFECYCLE_ARCHIVED,
     JOB_LIFECYCLE_TRASH,
@@ -29,6 +31,7 @@ from .db import (
     rows_to_dicts,
     utc_now,
 )
+from .defaults import DEFAULT_CORE_PROFILE
 from .services.email_client import sync_inbox, test_smtp
 from .services.importer import ImportedJob, fetch_linkedin_profile, import_from_text, import_from_url
 from .services.llm import analyze_job, answer_supplemental_questions, generate_application_package
@@ -40,6 +43,16 @@ templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 app = FastAPI(title="JESSA", version=__version__)
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
+
+STARTUP_STATUS: dict[str, Any] = {
+    "database_ready": False,
+    "database_error": "Startup has not completed.",
+    "llm_ready": False,
+    "active_llm_provider": None,
+    "setup_required": True,
+    "onboarding_required": False,
+    "issues": ["Startup has not completed."],
+}
 
 
 @app.middleware("http")
@@ -54,6 +67,42 @@ async def restrict_clients(request: Request, call_next):
             },
         )
     return await call_next(request)
+
+
+def _database_setup_message() -> str:
+    if not config.postgres_configured():
+        return (
+            "PostgreSQL is not configured. Edit .env and set POSTGRES_HOST, POSTGRES_PORT, "
+            "POSTGRES_USER, POSTGRES_PASS or POSTGRES_PASSWORD, and POSTGRES_DB_NAME, then restart JESSA."
+        )
+    return (
+        "PostgreSQL settings are present but the connection failed. Check the server address, port, "
+        "database name, user, password, SSL mode, and pg_hba.conf access for this app host, then restart JESSA."
+    )
+
+
+def _llm_setup_message() -> str:
+    return (
+        "No LLM API key is configured. Edit .env and add at least one of OPENAI_API_KEY, "
+        "CLAUDE_API_KEY or ANTHROPIC_API_KEY, GEMINI_API_KEY or GOOGLE_API_KEY, "
+        "or GROK_API_KEY or XAI_API_KEY. JESSA tries providers in JESSA_LLM_PROVIDER_PRIORITY order."
+    )
+
+
+async def _database_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": _database_setup_message(),
+            "error": str(exc),
+            "startup": STARTUP_STATUS,
+        },
+    )
+
+
+app.add_exception_handler(DatabaseConfigError, _database_exception_handler)
+if db_module.psycopg is not None:
+    app.add_exception_handler(db_module.psycopg.OperationalError, _database_exception_handler)
 
 
 class ImportRequest(BaseModel):
@@ -264,6 +313,19 @@ def _profile(conn) -> dict[str, Any]:
     return item
 
 
+def _is_default_profile(content: str) -> bool:
+    return content.strip() == DEFAULT_CORE_PROFILE.strip()
+
+
+def _runtime_counts(conn) -> dict[str, int]:
+    tables = ("jobs", "application_artifacts", "emails")
+    counts: dict[str, int] = {}
+    for table in tables:
+        row = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
+        counts[table] = int(row["count"] or 0)
+    return counts
+
+
 def _linkedin_profile(conn) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM linkedin_profile_cache WHERE id = 1").fetchone()
     item = row_to_dict(row)
@@ -316,6 +378,61 @@ def _profile_context(conn) -> tuple[dict[str, Any], str]:
 def _llm_context(conn) -> tuple[dict[str, Any], str, str]:
     profile, profile_text = _profile_context(conn)
     return profile, profile_text, get_app_prompt(conn)
+
+
+def _build_startup_status(initialize: bool = False) -> dict[str, Any]:
+    issues: list[str] = []
+    active_provider = config.active_llm_provider()
+    provider_status = config.llm_provider_status()
+    llm_ready = bool(active_provider)
+    if not llm_ready:
+        issues.append(_llm_setup_message())
+
+    database_ready = False
+    database_error = ""
+    onboarding_required = False
+    profile_is_default = False
+    counts: dict[str, int] = {}
+
+    if not config.postgres_configured():
+        database_error = _database_setup_message()
+        issues.insert(0, database_error)
+    else:
+        try:
+            if initialize:
+                init_db()
+            database_ready = True
+            with get_db() as conn:
+                profile = _profile(conn)
+                profile_is_default = _is_default_profile(str(profile.get("content") or ""))
+                counts = _runtime_counts(conn)
+                onboarding_required = profile_is_default and counts.get("jobs", 0) == 0
+        except Exception as exc:
+            database_error = f"{_database_setup_message()} Last error: {exc}"
+            issues.insert(0, database_error)
+
+    if onboarding_required:
+        issues.append("First run detected. Add the candidate profile before importing jobs.")
+
+    return {
+        "version": __version__,
+        "database_ready": database_ready,
+        "database_error": database_error,
+        "postgres_configured": config.postgres_configured(),
+        "postgres_host": config.POSTGRES_HOST,
+        "postgres_port": config.POSTGRES_PORT,
+        "postgres_database": config.POSTGRES_DB_NAME,
+        "llm_ready": llm_ready,
+        "active_llm_provider": active_provider["name"] if active_provider else None,
+        "active_llm_model": active_provider["model"] if active_provider else None,
+        "llm_provider_priority": list(config.LLM_PROVIDER_PRIORITY),
+        "llm_providers": provider_status,
+        "setup_required": (not database_ready) or (not llm_ready) or onboarding_required,
+        "onboarding_required": onboarding_required,
+        "profile_is_default": profile_is_default,
+        "counts": counts,
+        "issues": issues,
+    }
 
 
 def _get_job(conn, job_id: int) -> dict[str, Any]:
@@ -453,7 +570,8 @@ def _insert_or_update_job(conn, imported: ImportedJob) -> int:
 
 @app.on_event("startup")
 def startup() -> None:
-    init_db()
+    global STARTUP_STATUS
+    STARTUP_STATUS = _build_startup_status(initialize=True)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -463,7 +581,7 @@ def index(request: Request) -> HTMLResponse:
         "index.html",
         {
             "version": __version__,
-            "model": config.OPENAI_MODEL,
+            "model": STARTUP_STATUS.get("active_llm_model") or config.OPENAI_MODEL,
             "email_user": config.EMAIL_USER,
         },
     )
@@ -473,21 +591,24 @@ def index(request: Request) -> HTMLResponse:
 def health() -> dict[str, Any]:
     linkedin_cached = False
     linkedin_url = config.LINKEDIN_PROFILE_URL
-    try:
+    if STARTUP_STATUS.get("database_ready"):
         with get_db() as conn:
             linkedin = _linkedin_profile(conn)
             linkedin_cached = bool(str(linkedin.get("content") or "").strip())
             linkedin_url = str(linkedin.get("url") or linkedin_url)
-    except Exception:
-        linkedin_cached = False
     return {
-        "ok": True,
+        "ok": bool(STARTUP_STATUS.get("database_ready") and STARTUP_STATUS.get("llm_ready")),
         "version": __version__,
         "db_backend": config.DB_BACKEND,
         "postgres_configured": config.postgres_configured(),
         "postgres_host": config.POSTGRES_HOST,
         "postgres_port": config.POSTGRES_PORT,
         "postgres_database": config.POSTGRES_DB_NAME,
+        "llm_configured": bool(STARTUP_STATUS.get("llm_ready")),
+        "llm_active_provider": STARTUP_STATUS.get("active_llm_provider"),
+        "llm_active_model": STARTUP_STATUS.get("active_llm_model"),
+        "llm_provider_priority": STARTUP_STATUS.get("llm_provider_priority"),
+        "llm_providers": STARTUP_STATUS.get("llm_providers"),
         "openai_configured": bool(config.OPENAI_API_KEY),
         "email_configured": bool(config.EMAIL_USER and config.EMAIL_PASSWORD),
         "email_imap_host": config.EMAIL_IMAP_HOST,
@@ -498,7 +619,17 @@ def health() -> dict[str, Any]:
         "linkedin_profile_cached": linkedin_cached,
         "linkedin_profile_url": linkedin_url,
         "linkedin_browser_profile_dir": str(config.LINKEDIN_BROWSER_PROFILE_DIR),
+        "setup_required": STARTUP_STATUS.get("setup_required"),
+        "onboarding_required": STARTUP_STATUS.get("onboarding_required"),
+        "startup_issues": STARTUP_STATUS.get("issues", []),
     }
+
+
+@app.get("/api/startup")
+def startup_status() -> dict[str, Any]:
+    global STARTUP_STATUS
+    STARTUP_STATUS = _build_startup_status(initialize=False)
+    return STARTUP_STATUS
 
 
 @app.get("/api/profile")
@@ -515,6 +646,69 @@ def update_profile(update: ProfileUpdate) -> dict[str, Any]:
         conn.execute(
             "UPDATE core_profile SET content = ?, version = ?, updated_at = ? WHERE id = 1",
             (update.content, version, utc_now()),
+        )
+        return _profile(conn)
+
+
+def _decode_profile_upload(upload: UploadFile, data: bytes) -> str:
+    name = (upload.filename or "resume").lower()
+    if name.endswith(".pdf"):
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="PDF resume import requires pypdf. Run python -m pip install -r requirements.txt.",
+            ) from exc
+        reader = PdfReader(BytesIO(data))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n\n".join(page.strip() for page in pages if page.strip())
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1", errors="replace")
+
+
+@app.post("/api/profile/import")
+async def import_profile(
+    resume_text: str = Form(""),
+    mode: str = Form("append"),
+    resume_file: UploadFile | None = File(None),
+) -> dict[str, Any]:
+    parts: list[str] = []
+    if resume_text.strip():
+        parts.append(resume_text.strip())
+    if resume_file and resume_file.filename:
+        data = await resume_file.read()
+        if data:
+            decoded = _decode_profile_upload(resume_file, data).strip()
+            if decoded:
+                parts.append(f"## Uploaded Resume: {resume_file.filename}\n\n{decoded}")
+    imported = "\n\n".join(parts).strip()
+    if not imported:
+        raise HTTPException(status_code=400, detail="Paste profile text or choose a resume file first.")
+    with get_db() as conn:
+        current = _profile(conn)
+        current_content = str(current.get("content") or "")
+        replace = mode.strip().lower() == "replace" or _is_default_profile(current_content)
+        if replace:
+            content = (
+                "# Candidate Core Profile\n\n"
+                "Review and edit this imported profile before generating application materials.\n\n"
+                "## Imported Resume/Profile\n\n"
+                f"{imported}\n"
+            )
+        else:
+            content = (
+                f"{current_content.rstrip()}\n\n"
+                "# Imported Resume/Profile\n\n"
+                "Review and merge this imported material into the canonical sections above.\n\n"
+                f"{imported}\n"
+            )
+        version = int(current["version"]) + 1
+        conn.execute(
+            "UPDATE core_profile SET content = ?, version = ?, updated_at = ? WHERE id = 1",
+            (content, version, utc_now()),
         )
         return _profile(conn)
 

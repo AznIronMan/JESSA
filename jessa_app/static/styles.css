@@ -102,6 +102,56 @@ textarea {
   display: block;
 }
 
+.setup-shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 22px 18px;
+}
+
+.setup-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.setup-header h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+#setup-status,
+#profile-import-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.setup-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.setup-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.setup-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.setup-card p {
+  margin: 6px 0;
+}
+
+.setup-card code {
+  overflow-wrap: anywhere;
+}
+
 .import-band,
 .email-actions {
   display: grid;
@@ -529,12 +579,17 @@ textarea {
   line-height: 1.5;
 }
 
+.profile-import-panel,
 .linkedin-profile-panel {
   display: grid;
   gap: 10px;
   padding: 14px 18px;
   background: #fff;
   border-bottom: 1px solid var(--line);
+}
+
+.profile-import-panel.hidden {
+  display: none;
 }
 
 .linkedin-profile-panel h2 {
@@ -549,12 +604,16 @@ textarea {
   justify-content: flex-end;
 }
 
+.profile-import-panel input,
+.profile-import-panel select,
+.profile-import-panel textarea,
 .linkedin-profile-panel input,
 .linkedin-profile-panel textarea {
   width: 100%;
   padding: 10px;
 }
 
+.profile-import-panel textarea,
 .linkedin-profile-panel textarea {
   min-height: 130px;
   resize: vertical;

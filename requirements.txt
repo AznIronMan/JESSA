@@ -9,3 +9,4 @@ openai>=1.100.0
 playwright>=1.54.0
 python-multipart>=0.0.20
 reportlab>=4.2.0
+pypdf>=5.0.0

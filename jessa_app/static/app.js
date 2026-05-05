@@ -1,4 +1,5 @@
 const state = {
+  startup: null,
   jobs: [],
   selectedJobId: null,
   jobView: "active",
@@ -29,9 +30,22 @@ function toast(message) {
   window.setTimeout(() => node.classList.add("hidden"), 4200);
 }
 
+function showTab(tabName) {
+  document.querySelectorAll(".tab").forEach((node) => node.classList.remove("active"));
+  document.querySelectorAll(".view").forEach((node) => node.classList.remove("active"));
+  const tab = document.querySelector(`[data-tab="${tabName}"]`);
+  const view = $(`#${tabName}-view`);
+  if (tab) tab.classList.add("active");
+  if (view) view.classList.add("active");
+}
+
 async function api(path, options = {}) {
+  const isFormData = options.body instanceof FormData;
+  const headers = isFormData
+    ? { ...(options.headers || {}) }
+    : { "Content-Type": "application/json", ...(options.headers || {}) };
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers,
     ...options,
   });
   if (!response.ok) {
@@ -45,6 +59,64 @@ async function api(path, options = {}) {
     throw new Error(detail);
   }
   return response.json();
+}
+
+async function loadStartup() {
+  state.startup = await api("/api/startup");
+  renderSetup();
+  return state.startup;
+}
+
+function providerLine(name, info) {
+  const label = info.active ? "active" : info.configured ? "configured" : "missing";
+  return `<p><strong>${escapeHtml(name)}</strong>: ${escapeHtml(label)} · ${escapeHtml(info.model || "")}</p>`;
+}
+
+function renderSetup() {
+  const startup = state.startup;
+  if (!startup) return;
+  const setupTab = $("#setup-tab");
+  if (setupTab) setupTab.classList.toggle("hidden", !startup.setup_required);
+  const content = $("#setup-content");
+  if (!content) return;
+  $("#setup-status").textContent = startup.setup_required ? "action needed" : "ready";
+  const dbMessage = startup.database_ready
+    ? `<p>PostgreSQL is connected to <code>${escapeHtml(startup.postgres_database || "")}</code>.</p>`
+    : `<p>${escapeHtml(startup.database_error || "PostgreSQL is not ready.")}</p>`;
+  const llmMessage = startup.llm_ready
+    ? `<p>Using <code>${escapeHtml(startup.active_llm_provider)}:${escapeHtml(startup.active_llm_model)}</code>.</p>`
+    : `<p>Add at least one LLM API key in <code>.env</code>.</p>`;
+  const providers = Object.entries(startup.llm_providers || {})
+    .map(([name, info]) => providerLine(name, info))
+    .join("");
+  const issues = (startup.issues || []).map((issue) => `<p>${escapeHtml(issue)}</p>`).join("");
+  content.innerHTML = `
+    <article class="setup-card">
+      <h2>PostgreSQL</h2>
+      ${dbMessage}
+      <p><code>POSTGRES_HOST</code>, <code>POSTGRES_PORT</code>, <code>POSTGRES_USER</code>, <code>POSTGRES_PASS</code>, <code>POSTGRES_DB_NAME</code></p>
+    </article>
+    <article class="setup-card">
+      <h2>LLM Providers</h2>
+      ${llmMessage}
+      <p>Priority: <code>${escapeHtml((startup.llm_provider_priority || []).join(","))}</code></p>
+      ${providers}
+    </article>
+    <article class="setup-card">
+      <h2>First Run</h2>
+      <p>${startup.onboarding_required ? "Add the candidate profile before importing jobs." : "Core profile is initialized."}</p>
+      <button id="setup-open-profile">Core Profile</button>
+    </article>
+    ${issues ? `<article class="setup-card"><h2>Issues</h2>${issues}</article>` : ""}
+  `;
+  const openProfile = $("#setup-open-profile");
+  if (openProfile) {
+    openProfile.addEventListener("click", async () => {
+      showTab("profile");
+      await loadProfile();
+      await loadLinkedInProfile();
+    });
+  }
 }
 
 function badgeClass(value) {
@@ -656,6 +728,10 @@ async function loadProfile() {
   const profile = await api("/api/profile");
   $("#profile-editor").value = profile.content;
   $("#profile-version").textContent = `version ${profile.version} · ${profile.updated_at}`;
+  const panel = $("#profile-import-panel");
+  if (panel) panel.classList.toggle("hidden", !(state.startup?.onboarding_required || state.startup?.profile_is_default));
+  const mode = $("#profile-import-mode");
+  if (mode && state.startup?.profile_is_default) mode.value = "replace";
 }
 
 async function loadLinkedInProfile() {
@@ -674,7 +750,31 @@ async function saveProfile() {
     body: JSON.stringify({ content: $("#profile-editor").value }),
   });
   $("#profile-version").textContent = `version ${profile.version} · ${profile.updated_at}`;
+  state.startup = await api("/api/startup");
+  renderSetup();
   toast("Core profile saved.");
+}
+
+async function importProfile() {
+  const form = new FormData();
+  form.append("resume_text", $("#profile-import-text").value);
+  form.append("mode", $("#profile-import-mode").value);
+  const file = $("#profile-import-file").files[0];
+  if (file) form.append("resume_file", file);
+  $("#profile-import-status").textContent = "importing...";
+  const profile = await api("/api/profile/import", {
+    method: "POST",
+    headers: {},
+    body: form,
+  });
+  $("#profile-editor").value = profile.content;
+  $("#profile-version").textContent = `version ${profile.version} · ${profile.updated_at}`;
+  $("#profile-import-text").value = "";
+  $("#profile-import-file").value = "";
+  state.startup = await api("/api/startup");
+  renderSetup();
+  $("#profile-import-status").textContent = "imported";
+  toast("Profile imported.");
 }
 
 async function saveLinkedInProfile() {
@@ -750,10 +850,7 @@ async function testEmail() {
 function setupTabs() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", async () => {
-      document.querySelectorAll(".tab").forEach((node) => node.classList.remove("active"));
-      document.querySelectorAll(".view").forEach((node) => node.classList.remove("active"));
-      tab.classList.add("active");
-      $(`#${tab.dataset.tab}-view`).classList.add("active");
+      showTab(tab.dataset.tab);
       if (tab.dataset.tab === "profile") {
         await loadProfile();
         await loadLinkedInProfile();
@@ -794,6 +891,10 @@ function setupActions() {
   $("#import-url").addEventListener("click", () => importJob(false).catch((error) => toast(error.message)));
   $("#import-text").addEventListener("click", () => importJob(true).catch((error) => toast(error.message)));
   $("#save-profile").addEventListener("click", () => saveProfile().catch((error) => toast(error.message)));
+  $("#import-profile").addEventListener("click", () => importProfile().catch((error) => {
+    $("#profile-import-status").textContent = "import failed";
+    toast(error.message);
+  }));
   $("#save-linkedin-profile").addEventListener("click", () => saveLinkedInProfile().catch((error) => toast(error.message)));
   $("#fetch-linkedin-profile").addEventListener("click", () => fetchLinkedInProfileCache().catch((error) => {
     $("#linkedin-profile-status").textContent = "cache failed";
@@ -811,4 +912,21 @@ function setupActions() {
 
 setupTabs();
 setupActions();
-loadJobs().catch((error) => toast(error.message));
+(async function init() {
+  try {
+    const startup = await loadStartup();
+    if (!startup.database_ready || !startup.llm_ready) {
+      showTab("setup");
+      return;
+    }
+    if (startup.onboarding_required) {
+      showTab("profile");
+      await loadProfile();
+      await loadLinkedInProfile();
+      return;
+    }
+    await loadJobs();
+  } catch (error) {
+    toast(error.message);
+  }
+})();

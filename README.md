@@ -1,8 +1,17 @@
 # JESSA
 
-JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with OpenAI, and classifies Google Workspace email updates through IMAP.
+JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.0.0`
+Current version: `3.1.0`
+
+## v3.1 Scope
+
+- Startup no longer exits before the web UI when PostgreSQL is missing or invalid.
+- `/api/startup` and `/api/health` report setup issues for PostgreSQL and LLM provider configuration.
+- LLM provider priority is controlled by `JESSA_LLM_PROVIDER_PRIORITY`, defaulting to `openai,claude,gemini,grok`.
+- OpenAI, Claude, Gemini, and Grok API keys are supported. Missing or failing providers are skipped in priority order during generation.
+- A first-run setup view directs new users to configure `.env` and fill the Core Profile.
+- The Core Profile page can import pasted profile text or uploaded text/PDF resumes without changing existing saved profile data unless the user clicks Import.
 
 ## v3.0 Scope
 
@@ -163,10 +172,7 @@ The app reads `.env` from the project root. Keep `.env` out of git.
 Minimum:
 
 ```bash
-OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-5.4-mini
-
-EMAIL_USER=geoff@example.com
+EMAIL_USER=you@example.com
 EMAIL_APP_PASSWORD=...
 
 POSTGRES_HOST=127.0.0.1
@@ -175,6 +181,26 @@ POSTGRES_USER=jessa
 POSTGRES_PASS=...
 POSTGRES_DB_NAME=jessa
 ```
+
+At least one LLM provider key is required for AI analysis and document generation:
+
+```bash
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5.4-mini
+
+CLAUDE_API_KEY=
+CLAUDE_MODEL=claude-sonnet-4-5
+
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-2.0-flash
+
+GROK_API_KEY=
+GROK_MODEL=grok-4.3
+
+JESSA_LLM_PROVIDER_PRIORITY=openai,claude,gemini,grok
+```
+
+JESSA tries providers from left to right and skips providers that are missing a key or fail during a generation request. `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, and `XAI_API_KEY` are also accepted aliases for Claude, Gemini, and Grok respectively.
 
 Google Workspace/Gmail defaults are inferred:
 
@@ -270,6 +296,8 @@ Paste application questions into `Supplemental Questions` and click `Generate An
 
 The core profile is the source of truth for future scoring and resume generation. Fix dates, titles, canonical bullets, and career rules here first. Every save increments the profile version.
 
+On a new database, JESSA opens the setup/profile flow before the jobs workflow. Use the Profile Import panel to paste a resume/profile or upload a text/PDF resume, review the imported content in the Core Profile editor, then save any edits before importing jobs. Existing databases are not rewritten automatically.
+
 The LinkedIn Profile cache in this tab stores the candidate's current LinkedIn profile text separately from the canonical core profile. Use `Cache from URL` to open the persistent LinkedIn browser. If LinkedIn asks you to sign in, complete sign-in and click `I'm signed in, continue` in the JESSA overlay. Then click `Capture profile now`. JESSA expands visible profile text, visits supported `/details/...` profile sections, and refuses to save an empty or too-small browser capture. You can also paste profile text and use `Save Cache`. JESSA includes this cached profile as supporting context during job analysis and document generation.
 
 Resume-source rules belong in the Core Profile. Use them to identify the primary resume/source, secondary resume/source, do-not-use titles or claims, and any positioning rules for different role types.
@@ -309,6 +337,7 @@ This project uses semantic versioning.
 - `2.0.0`: breaking schema or workflow changes.
 - `2.x.0`: additive features on the PostgreSQL workflow with safe schema migration.
 - `3.0.0`: portability release that removes hardcoded personal defaults and starts new databases from generic candidate templates.
+- `3.1.0`: setup/onboarding and multi-provider LLM configuration improvements.
 
 ## Roadmap
 
@@ -319,6 +348,14 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.1.0
+
+- Added startup setup status reporting for missing or invalid PostgreSQL configuration.
+- Changed `start_jessa.sh` so the web UI can start and show setup guidance even when database settings need correction.
+- Added multi-provider LLM selection for OpenAI, Claude, Gemini, and Grok with configurable priority and provider failover.
+- Added first-run setup/onboarding UI and Core Profile import for pasted profile text or uploaded text/PDF resumes.
+- Updated `.env.example` with provider keys, model settings, and `JESSA_LLM_PROVIDER_PRIORITY=openai,claude,gemini,grok`.
 
 ### 3.0.0
 

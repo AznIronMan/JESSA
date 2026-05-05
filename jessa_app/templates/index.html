@@ -13,11 +13,22 @@
         <div class="meta">v{{ version }} · {{ model }} · {{ email_user or "email not configured" }}</div>
       </div>
       <nav class="tabs" aria-label="Views">
+        <button class="tab hidden" data-tab="setup" id="setup-tab">Setup</button>
         <button class="tab active" data-tab="jobs">Jobs</button>
         <button class="tab" data-tab="profile">Core Profile</button>
         <button class="tab" data-tab="email">Email</button>
       </nav>
     </header>
+
+    <main class="view" id="setup-view">
+      <section class="setup-shell">
+        <div class="setup-header">
+          <h1>Setup</h1>
+          <span id="setup-status"></span>
+        </div>
+        <div class="setup-grid" id="setup-content"></div>
+      </section>
+    </main>
 
     <main class="view active" id="jobs-view">
       <section class="import-band">
@@ -79,6 +90,23 @@
           </div>
           <button id="save-profile">Save</button>
         </div>
+        <section class="profile-import-panel hidden" id="profile-import-panel">
+          <div class="section-title-row">
+            <div>
+              <h2>Profile Import</h2>
+              <span id="profile-import-status"></span>
+            </div>
+            <div class="linkedin-profile-actions">
+              <select id="profile-import-mode">
+                <option value="append">Append</option>
+                <option value="replace">Replace starter profile</option>
+              </select>
+              <button id="import-profile">Import</button>
+            </div>
+          </div>
+          <input id="profile-import-file" type="file" accept=".txt,.md,.markdown,.json,.csv,.html,.htm,.pdf,text/*,application/pdf" />
+          <textarea id="profile-import-text" placeholder="Paste resume, profile, or career notes"></textarea>
+        </section>
         <section class="linkedin-profile-panel">
           <div class="section-title-row">
             <div>
