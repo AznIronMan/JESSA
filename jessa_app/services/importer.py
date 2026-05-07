@@ -44,7 +44,17 @@ class LinkedInProfileSnapshot:
 
 def source_from_url(url: str) -> str:
     host = urlparse(url).netloc.lower()
-    for marker in ("indeed", "dice", "ziprecruiter", "linkedin", "greenhouse", "lever", "ashby", "workday"):
+    for marker in (
+        "indeed",
+        "dice",
+        "ziprecruiter",
+        "linkedin",
+        "greenhouse",
+        "lever",
+        "ashby",
+        "workday",
+        "partnersindiversity",
+    ):
         if marker in host:
             return marker
     return host.replace("www.", "") or "url"
@@ -53,6 +63,11 @@ def source_from_url(url: str) -> str:
 def is_linkedin_url(url: str) -> bool:
     host = urlparse(url).netloc.lower()
     return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
+def is_partnersindiversity_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return host == "jobs.partnersindiversity.org"
 
 
 def clean_text(value: str | None, limit: int | None = None) -> str:
@@ -87,6 +102,12 @@ def strip_html(value: str | None) -> str:
     if not value:
         return ""
     return clean_text(BeautifulSoup(value, "html.parser").get_text(" "))
+
+
+def strip_html_multiline(value: str | None, limit: int | None = None) -> str:
+    if not value:
+        return ""
+    return clean_multiline_text(BeautifulSoup(value, "html.parser").get_text("\n"), limit=limit)
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -188,6 +209,18 @@ def _first_text(soup: BeautifulSoup, selectors: tuple[str, ...], limit: int | No
             if text:
                 return text
     return ""
+
+
+def _node_text(node: Any, limit: int | None = None) -> str:
+    if not node:
+        return ""
+    return clean_text(node.get_text(" "), limit=limit)
+
+
+def _node_multiline_text(node: Any, limit: int | None = None) -> str:
+    if not node:
+        return ""
+    return clean_multiline_text(node.get_text("\n"), limit=limit)
 
 
 def _meta_content(soup: BeautifulSoup, *keys: tuple[str, str]) -> str:
@@ -836,7 +869,92 @@ def parse_linkedin_html(url: str, html: str) -> ImportedJob:
     return imported
 
 
+def _partnersindiversity_apply_url(soup: BeautifulSoup, url: str) -> str:
+    button = soup.select_one("#btnApply")
+    onclick = str(button.get("onclick") or "") if button else ""
+    match = re.search(r"window\.open\((['\"])(?P<href>.+?)\1", onclick)
+    if match:
+        return clean_text(urljoin(url, match.group("href")))
+    job = _extract_json_ld(soup)
+    if job:
+        job_url = clean_text(job.get("url") or "")
+        if job_url:
+            return job_url
+    return url
+
+
+def _partnersindiversity_custom_fields(soup: BeautifulSoup) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for container in soup.select(".customFields .formItemContainer"):
+        label = _node_text(container.select_one(".formLabel"), limit=80)
+        value = _node_text(container.select_one(".formDataLabel"), limit=200)
+        if label and value:
+            fields[label] = value
+    return fields
+
+
+def _partnersindiversity_salary(soup: BeautifulSoup, job: dict[str, Any] | None) -> str:
+    visible_salary = _node_text(soup.select_one("#lblOutSalary"), limit=160)
+    if visible_salary:
+        json_salary = _salary_from_json_ld(job or {})
+        if json_salary.lower().startswith("usd ") and not re.search(r"\bUSD\b|\$", visible_salary, re.I):
+            return f"USD {visible_salary}"
+        return visible_salary
+    return _salary_from_json_ld(job or {})
+
+
+def _partnersindiversity_details_text(soup: BeautifulSoup) -> str:
+    fields = _partnersindiversity_custom_fields(soup)
+    address = _node_text(soup.select_one("#lblOutAddress"), limit=240)
+    lines: list[str] = []
+    for label, value in fields.items():
+        display_label = "Location mode" if label.lower() == "location" else label
+        lines.append(f"{display_label}: {value}")
+    if address:
+        lines.append(f"Address: {address}")
+    if not lines:
+        return ""
+    return "Partners in Diversity Details\n" + "\n".join(lines)
+
+
+def _partnersindiversity_description(soup: BeautifulSoup, job: dict[str, Any] | None) -> str:
+    if job:
+        description = strip_html_multiline(job.get("description", ""), limit=28000)
+    else:
+        description = _node_multiline_text(soup.select_one("#lblOutDescription"), limit=28000)
+    details = _partnersindiversity_details_text(soup)
+    return clean_multiline_text("\n\n".join(part for part in (description, details) if part), limit=30000)
+
+
+def parse_partnersindiversity_html(url: str, html: str) -> ImportedJob:
+    soup = BeautifulSoup(html, "html.parser")
+    job = _extract_json_ld(soup)
+    imported = ImportedJob(source="partnersindiversity", url=url, apply_url=_partnersindiversity_apply_url(soup, url))
+    imported.title = clean_text((job or {}).get("title", "")) or _first_text(soup, ("h1",), limit=200)
+    imported.company = _node_text(soup.select_one("#lblOutEmployer"), limit=160) or _company_from_json_ld(job or {})
+    imported.location = _location_from_json_ld(job or {}) or _node_text(soup.select_one("#lblOutAddress"), limit=160)
+    custom_fields = _partnersindiversity_custom_fields(soup)
+    location_mode = custom_fields.get("Location", "")
+    if location_mode and location_mode.lower() not in imported.location.lower():
+        imported.location = clean_text(" - ".join(part for part in (imported.location, location_mode) if part))
+    imported.salary = _partnersindiversity_salary(soup, job)
+    imported.posted_date = clean_text((job or {}).get("datePosted", "")) or _node_text(
+        soup.select_one("#lblOutPostedDate"),
+        limit=80,
+    )
+    imported.description = _partnersindiversity_description(soup, job) or _main_text(soup)
+    imported.extraction_note = (
+        "Extracted from Partners in Diversity JobBoardHQ JSON-LD and page fields."
+        if job
+        else "Extracted from Partners in Diversity page fields; review fields before applying."
+    )
+    return imported
+
+
 def parse_html(url: str, html: str) -> ImportedJob:
+    if is_partnersindiversity_url(url):
+        return parse_partnersindiversity_html(url, html)
+
     soup = BeautifulSoup(html, "html.parser")
     job = _extract_json_ld(soup)
     imported = ImportedJob(source=source_from_url(url), url=url, apply_url=url)

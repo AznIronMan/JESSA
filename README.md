@@ -2,7 +2,13 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.2.2`
+Current version: `3.2.3`
+
+## v3.2.3 Scope
+
+- Added explicit Partners in Diversity Career Center URL imports.
+- Partners in Diversity imports now use JobBoardHQ JSON-LD plus page fields for apply redirects, work mode, position type, experience, job category, address, and salary display.
+- Verified support for Partners in Diversity job URLs containing parenthesized slugs.
 
 ## v3.2.2 Scope
 
@@ -379,6 +385,12 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.2.3
+
+- Added a Partners in Diversity Career Center importer adapter for `jobs.partnersindiversity.org` URLs.
+- Captured JobBoardHQ apply redirects and custom fields alongside structured `JobPosting` JSON-LD.
+- Added importer regression tests covering Partners in Diversity URLs with parenthesized slug paths.
 
 ### 3.2.2
 
