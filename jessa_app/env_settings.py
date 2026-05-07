@@ -44,6 +44,8 @@ ENV_FIELDS = (
     EnvField("EMAIL_LOOKBACK_DAYS", "Lookback Days", "Email", kind="number"),
     EnvField("EMAIL_MAX_FETCH", "Max Fetch", "Email", kind="number"),
     EnvField("EMAIL_SMTP_TLS", "SMTP TLS", "Email", kind="boolean"),
+    EnvField("JESSA_HOST", "Listener Host", "Access", help="Used by start_jessa.sh after restart."),
+    EnvField("JESSA_PORT", "Listener Port", "Access", kind="number", help="Used by start_jessa.sh and stop_jessa.sh after restart."),
     EnvField("JESSA_ALLOWED_CLIENT_NETWORKS", "Allowed Client Networks", "Access"),
     EnvField("PLAYWRIGHT_BROWSER_PATH", "Browser Path", "Paths and LinkedIn"),
     EnvField("JESSA_RESUME_DIR", "Resume Directory", "Paths and LinkedIn"),

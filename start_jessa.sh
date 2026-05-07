@@ -4,14 +4,38 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-HOST="${JESSA_HOST:-0.0.0.0}"
-PORT="${JESSA_PORT:-8765}"
-
 if [[ ! -x ".venv/bin/python" ]]; then
   echo "Missing .venv. Create it with:"
   echo "  python3 -m venv .venv"
   echo "  source .venv/bin/activate"
   echo "  python -m pip install -r requirements.txt"
+  exit 1
+fi
+
+dotenv_value() {
+  local name="$1"
+  .venv/bin/python - "$name" <<'PY'
+from pathlib import Path
+import sys
+
+try:
+    from dotenv import dotenv_values
+except Exception:
+    sys.exit(0)
+
+value = dotenv_values(Path.cwd() / ".env").get(sys.argv[1])
+if value:
+    print(value)
+PY
+}
+
+HOST="${JESSA_HOST:-$(dotenv_value JESSA_HOST)}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${JESSA_PORT:-$(dotenv_value JESSA_PORT)}"
+PORT="${PORT:-9122}"
+
+if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+  echo "Invalid JESSA_PORT '$PORT'. Set JESSA_PORT to a numeric TCP port from 1 to 65535."
   exit 1
 fi
 

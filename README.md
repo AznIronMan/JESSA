@@ -2,7 +2,13 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.2.1`
+Current version: `3.2.2`
+
+## v3.2.2 Scope
+
+- `start_jessa.sh` and `stop_jessa.sh` now read `JESSA_HOST` and `JESSA_PORT` from `.env`.
+- The process environment still overrides `.env` for one-off launches.
+- The current local listener port is set to `9122`.
 
 ## v3.2.1 Scope
 
@@ -156,16 +162,21 @@ Initialize and run:
 
 ```bash
 source .venv/bin/activate
-uvicorn jessa_app.main:app --reload --host 0.0.0.0 --port 8765
+uvicorn jessa_app.main:app --reload --host 0.0.0.0 --port 9122
 ```
 
-Or use the project launcher:
+Or use the project launcher. It reads `JESSA_HOST` and `JESSA_PORT` from `.env`:
+
+```bash
+JESSA_HOST=0.0.0.0
+JESSA_PORT=9122
+```
 
 ```bash
 ./start_jessa.sh
 ```
 
-To run on another port:
+To run on another port for a single launch:
 
 ```bash
 JESSA_PORT=8766 ./start_jessa.sh
@@ -174,8 +185,8 @@ JESSA_PORT=8766 ./start_jessa.sh
 Open:
 
 ```text
-http://127.0.0.1:8765
-http://<this-mac-10.0.x.x-ip>:8765
+http://127.0.0.1:9122
+http://<this-mac-10.0.x.x-ip>:9122
 ```
 
 The launcher binds to `0.0.0.0` by default so other `10.0.x.x` devices can reach it. The app still rejects clients outside the configured allowed networks.
@@ -357,6 +368,7 @@ This project uses semantic versioning.
 - `3.1.0`: setup/onboarding and multi-provider LLM configuration improvements.
 - `3.2.0`: settings UI improvements that preserve the existing data model.
 - `3.2.1`: email false-positive reduction that preserves the existing data model.
+- `3.2.2`: `.env`-controlled app listener host/port for local launcher scripts.
 
 ## Roadmap
 
@@ -367,6 +379,13 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.2.2
+
+- Made `start_jessa.sh` read `JESSA_HOST` and `JESSA_PORT` from `.env`, with process environment overrides still supported.
+- Made `stop_jessa.sh` use the same `.env` port when looking for the listener.
+- Added listener host and port fields to the Settings dialog.
+- Updated `.env.example` and local configuration to use port `9122`.
 
 ### 3.2.1
 

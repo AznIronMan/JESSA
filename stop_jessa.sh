@@ -4,7 +4,26 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-PORT="${JESSA_PORT:-8765}"
+dotenv_value() {
+  local name="$1"
+  [[ -x ".venv/bin/python" ]] || return 0
+  .venv/bin/python - "$name" <<'PY'
+from pathlib import Path
+import sys
+
+try:
+    from dotenv import dotenv_values
+except Exception:
+    sys.exit(0)
+
+value = dotenv_values(Path.cwd() / ".env").get(sys.argv[1])
+if value:
+    print(value)
+PY
+}
+
+PORT="${JESSA_PORT:-$(dotenv_value JESSA_PORT)}"
+PORT="${PORT:-9122}"
 PIDS=()
 
 add_pid() {
@@ -23,10 +42,11 @@ is_jessa_pid() {
   local command
   local cwd
   command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command" == *"jessa_app.main:app"* ]] || return 1
-  [[ "$command" == *"$ROOT_DIR"* ]] && return 0
   cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
-  [[ "$cwd" == "$ROOT_DIR" ]]
+  if [[ "$command" == *"jessa_app.main:app"* ]]; then
+    [[ "$command" == *"$ROOT_DIR"* || "$cwd" == "$ROOT_DIR" ]] && return 0
+  fi
+  [[ -z "$command" && "$cwd" == "$ROOT_DIR" ]]
 }
 
 if [[ -f data/server.pid ]]; then
@@ -44,7 +64,7 @@ if command -v pgrep >/dev/null 2>&1; then
   done < <(pgrep -f "jessa_app.main:app" 2>/dev/null || true)
 fi
 
-if command -v lsof >/dev/null 2>&1; then
+if command -v lsof >/dev/null 2>&1 && [[ "$PORT" =~ ^[0-9]+$ ]]; then
   while IFS= read -r pid; do
     if is_jessa_pid "$pid"; then
       add_pid "$pid"
