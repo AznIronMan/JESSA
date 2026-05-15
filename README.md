@@ -2,7 +2,13 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.2.3`
+Current version: `3.2.4`
+
+## v3.2.4 Scope
+
+- Added explicit Hey Health Tech Job Board imports for `jobs.heyhealthtech.com` URLs.
+- Hey Health Tech imports now capture the employer apply URL, polished salary display, applicant country, employment type, and category from Job Boardly page fields.
+- Verified support against the Implementation Manager, Enterprise Scribe sample posting.
 
 ## v3.2.3 Scope
 
@@ -375,6 +381,8 @@ This project uses semantic versioning.
 - `3.2.0`: settings UI improvements that preserve the existing data model.
 - `3.2.1`: email false-positive reduction that preserves the existing data model.
 - `3.2.2`: `.env`-controlled app listener host/port for local launcher scripts.
+- `3.2.3`: Partners in Diversity importer coverage without data model changes.
+- `3.2.4`: Hey Health Tech importer coverage without data model changes.
 
 ## Roadmap
 
@@ -385,6 +393,13 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.2.4
+
+- Added a Hey Health Tech Job Board importer adapter for `jobs.heyhealthtech.com` URLs.
+- Captured Job Boardly apply links from `#apply-btn` instead of storing the listing URL as the apply URL.
+- Enriched imported Hey Health Tech jobs with visible salary, applicant country, employment type, category, and multiline descriptions.
+- Added importer regression tests covering the supplied Implementation Manager, Enterprise Scribe sample URL.
 
 ### 3.2.3
 

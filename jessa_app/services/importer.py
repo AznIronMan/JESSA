@@ -54,6 +54,7 @@ def source_from_url(url: str) -> str:
         "ashby",
         "workday",
         "partnersindiversity",
+        "heyhealthtech",
     ):
         if marker in host:
             return marker
@@ -68,6 +69,11 @@ def is_linkedin_url(url: str) -> bool:
 def is_partnersindiversity_url(url: str) -> bool:
     host = urlparse(url).netloc.lower()
     return host == "jobs.partnersindiversity.org"
+
+
+def is_heyhealthtech_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return host == "jobs.heyhealthtech.com"
 
 
 def clean_text(value: str | None, limit: int | None = None) -> str:
@@ -951,7 +957,171 @@ def parse_partnersindiversity_html(url: str, html: str) -> ImportedJob:
     return imported
 
 
+EMPLOYMENT_TYPE_LABELS = {
+    "FULL_TIME": "Full-time",
+    "PART_TIME": "Part-time",
+    "CONTRACTOR": "Contract",
+    "CONTRACT": "Contract",
+    "TEMPORARY": "Temporary",
+    "INTERN": "Internship",
+    "INTERNSHIP": "Internship",
+    "VOLUNTEER": "Volunteer",
+    "PER_DIEM": "Per diem",
+    "OTHER": "Other",
+}
+
+
+def _schema_token_label(value: Any) -> str:
+    if isinstance(value, list):
+        return ", ".join(label for item in value if (label := _schema_token_label(item)))
+    text = clean_text(str(value or ""))
+    if not text:
+        return ""
+    return EMPLOYMENT_TYPE_LABELS.get(text.upper(), text.replace("_", " ").replace("-", " ").title())
+
+
+def _applicant_location_from_json_ld(job: dict[str, Any] | None) -> str:
+    if not job:
+        return ""
+    locations: list[str] = []
+    for item in _as_list(job.get("applicantLocationRequirements")):
+        if isinstance(item, dict):
+            location = clean_text(item.get("name") or item.get("addressCountry") or "")
+        else:
+            location = clean_text(str(item or ""))
+        if location:
+            locations.append(location)
+    return "; ".join(dict.fromkeys(locations))
+
+
+def _heyhealthtech_apply_url(soup: BeautifulSoup, url: str, job: dict[str, Any] | None = None) -> str:
+    button = soup.select_one("#apply-btn[href]")
+    if button:
+        return clean_text(urljoin(url, str(button.get("href") or "")))
+    for link in soup.find_all("a", href=True):
+        label = _node_text(link, limit=80).lower()
+        if "apply" in label and "report" not in label:
+            return clean_text(urljoin(url, str(link.get("href") or "")))
+    if job:
+        job_url = clean_text(job.get("url") or "")
+        if job_url:
+            return job_url
+    return url
+
+
+def _heyhealthtech_top_card_lines(soup: BeautifulSoup) -> list[str]:
+    root = soup.select_one('[data-controller="job"]') or soup.find("main") or soup.body or soup
+    fragment = BeautifulSoup(str(root), "html.parser")
+    for tag in fragment(["script", "style", "noscript", "svg", "footer", "form"]):
+        tag.decompose()
+    description = fragment.select_one(".rich-text")
+    raw_text = fragment.get_text("\n")
+    if description:
+        description_lines = [line for line in clean_multiline_text(description.get_text("\n")).splitlines() if line]
+        if description_lines and description_lines[0] in raw_text:
+            raw_text = raw_text.split(description_lines[0], 1)[0]
+    return [clean_text(line) for line in raw_text.splitlines() if clean_text(line)]
+
+
+def _heyhealthtech_top_card_fields(soup: BeautifulSoup, job: dict[str, Any] | None) -> dict[str, str]:
+    fields = {
+        "posted_relative": "",
+        "employment_type": "",
+        "work_mode": "",
+        "applicant_location": "",
+        "salary": "",
+        "category": "",
+    }
+    applicant_location = _applicant_location_from_json_ld(job)
+    for line in _heyhealthtech_top_card_lines(soup)[:30]:
+        lowered = line.lower()
+        if not fields["posted_relative"] and re.search(r"\b(ago|posted)\b", lowered):
+            fields["posted_relative"] = line
+        elif not fields["employment_type"] and lowered in {
+            "full-time",
+            "part-time",
+            "contract",
+            "temporary",
+            "internship",
+            "volunteer",
+            "per diem",
+        }:
+            fields["employment_type"] = line
+        elif not fields["work_mode"] and lowered in {"remote", "hybrid", "on-site", "onsite", "on site"}:
+            fields["work_mode"] = line
+        elif not fields["salary"] and re.search(r"(\$\s?\d[\d,]*(?:\.\d+)?\s*-\s*\$\s?\d|USD\s?\d.*-\s*\d)", line, re.I):
+            fields["salary"] = line
+        elif not fields["applicant_location"] and applicant_location and lowered == applicant_location.lower():
+            fields["applicant_location"] = line
+        elif not fields["category"] and re.fullmatch(r"(non-)?clinical(?:\s+jobs?)?", lowered):
+            fields["category"] = line
+    if not fields["employment_type"] and job:
+        fields["employment_type"] = _schema_token_label(job.get("employmentType"))
+    if not fields["applicant_location"]:
+        fields["applicant_location"] = applicant_location
+    return fields
+
+
+def _heyhealthtech_salary(soup: BeautifulSoup, job: dict[str, Any] | None) -> str:
+    fields = _heyhealthtech_top_card_fields(soup, job)
+    return fields.get("salary") or _salary_from_json_ld(job or {})
+
+
+def _heyhealthtech_description(soup: BeautifulSoup, job: dict[str, Any] | None) -> str:
+    if job:
+        description = strip_html_multiline(job.get("description", ""), limit=28000)
+    else:
+        description = _node_multiline_text(soup.select_one(".rich-text"), limit=28000)
+    fields = _heyhealthtech_top_card_fields(soup, job)
+    details: list[str] = []
+    if fields.get("employment_type"):
+        details.append(f"Employment Type: {fields['employment_type']}")
+    if fields.get("work_mode"):
+        details.append(f"Work mode: {fields['work_mode']}")
+    if fields.get("applicant_location"):
+        details.append(f"Applicant location: {fields['applicant_location']}")
+    if fields.get("category"):
+        details.append(f"Category: {fields['category']}")
+    if job:
+        valid_through = clean_text(job.get("validThrough", ""))
+        company_site = ""
+        org = job.get("hiringOrganization")
+        if isinstance(org, dict):
+            company_site = clean_text(org.get("sameAs", ""))
+        if valid_through:
+            details.append(f"Valid through: {valid_through}")
+        if company_site:
+            details.append(f"Company website: {company_site}")
+    details_text = "Hey Health Tech Details\n" + "\n".join(details) if details else ""
+    return clean_multiline_text("\n\n".join(part for part in (description, details_text) if part), limit=30000)
+
+
+def parse_heyhealthtech_html(url: str, html: str) -> ImportedJob:
+    soup = BeautifulSoup(html, "html.parser")
+    job = _extract_json_ld(soup)
+    fields = _heyhealthtech_top_card_fields(soup, job)
+    imported = ImportedJob(source="heyhealthtech", url=url, apply_url=_heyhealthtech_apply_url(soup, url, job))
+    imported.title = clean_text((job or {}).get("title", "")) or _first_text(soup, ("h1",), limit=200)
+    imported.company = _company_from_json_ld(job or {}) or _first_text(soup, ('a[href^="http"]',), limit=160)
+    location = _location_from_json_ld(job or {}) or fields.get("work_mode") or fields.get("applicant_location", "")
+    applicant_location = fields.get("applicant_location", "")
+    if applicant_location and applicant_location.lower() not in location.lower():
+        location = clean_text(" - ".join(part for part in (location, applicant_location) if part))
+    imported.location = location
+    imported.salary = _heyhealthtech_salary(soup, job)
+    imported.posted_date = clean_text((job or {}).get("datePosted", "")) or fields.get("posted_relative", "")
+    imported.description = _heyhealthtech_description(soup, job) or _main_text(soup)
+    imported.extraction_note = (
+        "Extracted from Hey Health Tech Job Boardly JSON-LD and page fields."
+        if job
+        else "Extracted from Hey Health Tech page fields; review fields before applying."
+    )
+    return imported
+
+
 def parse_html(url: str, html: str) -> ImportedJob:
+    if is_heyhealthtech_url(url):
+        return parse_heyhealthtech_html(url, html)
     if is_partnersindiversity_url(url):
         return parse_partnersindiversity_html(url, html)
 
