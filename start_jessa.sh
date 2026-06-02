@@ -12,6 +12,10 @@ if [[ ! -x ".venv/bin/python" ]]; then
   exit 1
 fi
 
+if [[ -f "scripts/check_playwright_browser.py" ]]; then
+  .venv/bin/python scripts/check_playwright_browser.py
+fi
+
 dotenv_value() {
   local name="$1"
   .venv/bin/python - "$name" <<'PY'

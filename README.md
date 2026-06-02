@@ -2,7 +2,14 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.2.4`
+Current version: `3.2.5`
+
+## v3.2.5 Scope
+
+- Added a startup Playwright browser availability check for rendered and LinkedIn URL imports.
+- Documented that Playwright browsers must be installed in the JESSA server environment, not on the client browser machine.
+- Added Ubuntu server guidance for using system Google Chrome when Playwright's bundled Chromium installer does not support the distro.
+- Rendered imports now default to headless mode on Linux servers without `DISPLAY` or `WAYLAND_DISPLAY`.
 
 ## v3.2.4 Scope
 
@@ -150,13 +157,37 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-Optional Playwright browser install:
+Rendered and LinkedIn URL imports launch Playwright in the environment running the JESSA server. Install the browser there, not on the laptop or browser that opens the web UI.
+
+Check browser availability:
+
+```bash
+python scripts/check_playwright_browser.py --strict
+```
+
+On supported operating systems, install Playwright's bundled Chromium:
 
 ```bash
 python -m playwright install chromium
 ```
 
-On Linux, Playwright's bundled Chromium installer may reject the current distro label. The app will automatically use `google-chrome`, `google-chrome-stable`, `chromium`, or `chromium-browser` when present on `PATH`.
+On Linux, Playwright's bundled Chromium installer may reject the current distro label. For example, Ubuntu 26.04 can report `Playwright does not support chromium on ubuntu26.04-x64`. In that case, install a system browser such as Google Chrome Stable and let JESSA auto-detect it on `PATH`:
+
+```bash
+curl -fsSL -o /tmp/google-chrome-stable_current_amd64.deb \
+  https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo apt-get update
+sudo apt-get install -y /tmp/google-chrome-stable_current_amd64.deb
+rm -f /tmp/google-chrome-stable_current_amd64.deb
+```
+
+The app automatically uses `google-chrome`, `google-chrome-stable`, `chromium`, or `chromium-browser` when present on `PATH`.
+
+Rendered imports default to headless mode on Linux servers when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set. Override that behavior when needed:
+
+```bash
+JESSA_PLAYWRIGHT_RENDERED_HEADLESS=false
+```
 
 On macOS, the app will automatically use Google Chrome when it is installed at:
 
@@ -167,7 +198,7 @@ On macOS, the app will automatically use Google Chrome when it is installed at:
 You can override the browser path on either OS:
 
 ```bash
-PLAYWRIGHT_BROWSER_PATH=/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome
+PLAYWRIGHT_BROWSER_PATH=/usr/bin/google-chrome-stable
 ```
 
 Initialize and run:
@@ -322,7 +353,7 @@ Google Workspace notes:
 
 ### Jobs
 
-Paste a job URL and click `Import`. LinkedIn URLs automatically select the `LinkedIn` import mode, which opens a visible browser using the local `data/linkedin-browser` profile so sign-in state can be reused. If a non-LinkedIn page is heavily dynamic, choose `Rendered`; this uses a visible Playwright Chromium session. If URL import fails, paste the job text and use `Import Text`.
+Paste a job URL and click `Import`. LinkedIn URLs automatically select the `LinkedIn` import mode, which opens a visible browser using the server-side `data/linkedin-browser` profile so sign-in state can be reused. If a non-LinkedIn page is heavily dynamic, choose `Rendered`; this uses a server-side Playwright browser session and can run headless on display-less Linux services. If URL import fails, paste the job text and use `Import Text`.
 
 Select a job on the left, review/edit fields, then click `Analyze`. JESSA updates the match metrics, salary target, resume base, resume notes, and cover letter, then creates tailored resume and cover-letter artifacts automatically.
 
@@ -383,6 +414,7 @@ This project uses semantic versioning.
 - `3.2.2`: `.env`-controlled app listener host/port for local launcher scripts.
 - `3.2.3`: Partners in Diversity importer coverage without data model changes.
 - `3.2.4`: Hey Health Tech importer coverage without data model changes.
+- `3.2.5`: Playwright browser deployment checks, server install guidance, and headless rendered imports.
 
 ## Roadmap
 
@@ -393,6 +425,13 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.2.5
+
+- Added `scripts/check_playwright_browser.py` for strict setup verification and launcher-time warnings.
+- Made `start_jessa.sh` report browser availability before starting the local uvicorn process.
+- Documented server-side Playwright browser installation, including the Google Chrome Stable fallback for unsupported Linux distro labels.
+- Made rendered imports default to headless mode on Linux services without a display server.
 
 ### 3.2.4
 

@@ -48,6 +48,12 @@ ENV_FIELDS = (
     EnvField("JESSA_PORT", "Listener Port", "Access", kind="number", help="Used by start_jessa.sh and stop_jessa.sh after restart."),
     EnvField("JESSA_ALLOWED_CLIENT_NETWORKS", "Allowed Client Networks", "Access"),
     EnvField("PLAYWRIGHT_BROWSER_PATH", "Browser Path", "Paths and LinkedIn"),
+    EnvField(
+        "JESSA_PLAYWRIGHT_RENDERED_HEADLESS",
+        "Rendered Headless",
+        "Paths and LinkedIn",
+        help="Use auto, true, or false. Auto is headless on Linux servers without DISPLAY.",
+    ),
     EnvField("JESSA_RESUME_DIR", "Resume Directory", "Paths and LinkedIn"),
     EnvField("JESSA_SQLITE_IMPORT_PATH", "Legacy SQLite Import Path", "Paths and LinkedIn"),
     EnvField("JESSA_PROFILE_SOURCE", "Profile Seed File", "Paths and LinkedIn"),

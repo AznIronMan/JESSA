@@ -641,16 +641,17 @@ async def fetch_url_with_playwright(url: str) -> str:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        launch_args: dict[str, Any] = {"headless": False}
+        launch_args: dict[str, Any] = {"headless": config.PLAYWRIGHT_RENDERED_HEADLESS}
         if config.PLAYWRIGHT_BROWSER_PATH:
             launch_args["executable_path"] = config.PLAYWRIGHT_BROWSER_PATH
         browser = await p.chromium.launch(**launch_args)
-        page = await browser.new_page(user_agent=USER_AGENT)
-        await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        await page.wait_for_timeout(2500)
-        html = await page.content()
-        await browser.close()
-        return html
+        try:
+            page = await browser.new_page(user_agent=USER_AGENT)
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(2500)
+            return await page.content()
+        finally:
+            await browser.close()
 
 
 LINKEDIN_WORK_MODES = {"remote", "hybrid", "on-site", "onsite", "on site"}

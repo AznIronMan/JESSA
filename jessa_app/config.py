@@ -22,6 +22,15 @@ def _bool(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _playwright_rendered_headless() -> bool:
+    value = os.getenv("JESSA_PLAYWRIGHT_RENDERED_HEADLESS", "").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return platform.system() == "Linux" and not (os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
+
+
 def _int(name: str, default: int) -> int:
     value = os.getenv(name)
     if not value:
@@ -169,6 +178,7 @@ if not PLAYWRIGHT_BROWSER_PATH:
         or _macos_chrome_path()
         or ""
     )
+PLAYWRIGHT_RENDERED_HEADLESS = _playwright_rendered_headless()
 
 
 def allowed_client_networks() -> list[str]:
