@@ -270,19 +270,33 @@ async def fetch_url(url: str) -> str:
         return response.text
 
 
+def _linkedin_login_required_message() -> str:
+    if config.LINKEDIN_BROWSER_HEADLESS:
+        return (
+            "LinkedIn login is required, but the server-side LinkedIn browser is running headless. "
+            "Sign in to the persistent LinkedIn browser profile from an interactive server session "
+            "or run it with a display/Xvfb, then import again."
+        )
+    return "LinkedIn login is required. Sign in using the browser window JESSA opened, then import again."
+
+
+def _linkedin_persistent_launch_args() -> dict[str, Any]:
+    launch_args: dict[str, Any] = {
+        "headless": config.LINKEDIN_BROWSER_HEADLESS,
+        "user_data_dir": str(config.LINKEDIN_BROWSER_PROFILE_DIR),
+    }
+    if config.PLAYWRIGHT_BROWSER_PATH:
+        launch_args["executable_path"] = config.PLAYWRIGHT_BROWSER_PATH
+    return launch_args
+
+
 async def fetch_url_with_persistent_browser(url: str, settle_ms: int | None = None) -> str:
     from playwright.async_api import async_playwright
 
     settle = settle_ms if settle_ms is not None else config.LINKEDIN_PAGE_SETTLE_MS
     config.LINKEDIN_BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
-        launch_args: dict[str, Any] = {
-            "headless": False,
-            "user_data_dir": str(config.LINKEDIN_BROWSER_PROFILE_DIR),
-        }
-        if config.PLAYWRIGHT_BROWSER_PATH:
-            launch_args["executable_path"] = config.PLAYWRIGHT_BROWSER_PATH
-        context = await p.chromium.launch_persistent_context(**launch_args)
+        context = await p.chromium.launch_persistent_context(**_linkedin_persistent_launch_args())
         try:
             page = context.pages[0] if context.pages else await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -425,6 +439,9 @@ async def _install_linkedin_overlay(page: Any, mode: str) -> None:
 
 async def _wait_for_linkedin_login_continue(page: Any) -> None:
     import time
+
+    if config.LINKEDIN_BROWSER_HEADLESS:
+        raise RuntimeError(_linkedin_login_required_message())
 
     await _install_linkedin_overlay(page, "login")
     deadline = time.monotonic() + (config.LINKEDIN_LOGIN_WAIT_MS / 1000)
@@ -810,9 +827,7 @@ def _linkedin_job_description(imported: ImportedJob, lines: list[str], fields: d
 
 def parse_linkedin_html(url: str, html: str) -> ImportedJob:
     if _linkedin_login_required(html):
-        raise RuntimeError(
-            "LinkedIn login is required. Sign in using the browser window JESSA opened, then import again."
-        )
+        raise RuntimeError(_linkedin_login_required_message())
     soup = BeautifulSoup(html, "html.parser")
     snapshot = _rendered_page_snapshot(soup)
     page_title = clean_text(snapshot.get("title") or (soup.title.string if soup.title else ""), limit=300)
@@ -1167,13 +1182,7 @@ async def fetch_linkedin_profile(url: str) -> LinkedInProfileSnapshot:
 
     config.LINKEDIN_BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
-        launch_args: dict[str, Any] = {
-            "headless": False,
-            "user_data_dir": str(config.LINKEDIN_BROWSER_PROFILE_DIR),
-        }
-        if config.PLAYWRIGHT_BROWSER_PATH:
-            launch_args["executable_path"] = config.PLAYWRIGHT_BROWSER_PATH
-        context = await p.chromium.launch_persistent_context(**launch_args)
+        context = await p.chromium.launch_persistent_context(**_linkedin_persistent_launch_args())
         try:
             page = context.pages[0] if context.pages else await context.new_page()
             profile_url = _linkedin_profile_base_url(url)
@@ -1186,9 +1195,7 @@ async def fetch_linkedin_profile(url: str) -> LinkedInProfileSnapshot:
                 await page.wait_for_timeout(2500)
                 html = await page.content()
             if _linkedin_login_required(html):
-                raise RuntimeError(
-                    "LinkedIn login is still required. Sign in using the browser window, then cache again."
-                )
+                raise RuntimeError(_linkedin_login_required_message())
             await _scroll_linkedin_profile(page)
             await _wait_for_profile_capture_request(page)
             await _scroll_linkedin_profile(page)

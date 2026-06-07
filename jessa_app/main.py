@@ -704,6 +704,7 @@ def health() -> dict[str, Any]:
         "allowed_client_networks": config.allowed_client_networks(),
         "playwright_browser_path": config.PLAYWRIGHT_BROWSER_PATH,
         "playwright_rendered_headless": config.PLAYWRIGHT_RENDERED_HEADLESS,
+        "linkedin_browser_headless": config.LINKEDIN_BROWSER_HEADLESS,
         "trash_retention_hours": TRASH_RETENTION_HOURS,
         "linkedin_profile_cached": linkedin_cached,
         "linkedin_profile_url": linkedin_url,

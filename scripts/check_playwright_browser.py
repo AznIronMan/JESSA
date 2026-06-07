@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check whether Playwright can find a browser for rendered imports."""
+"""Check whether Playwright can find a browser for rendered and LinkedIn imports."""
 
 from __future__ import annotations
 

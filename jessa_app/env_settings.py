@@ -54,6 +54,12 @@ ENV_FIELDS = (
         "Paths and LinkedIn",
         help="Use auto, true, or false. Auto is headless on Linux servers without DISPLAY.",
     ),
+    EnvField(
+        "JESSA_LINKEDIN_BROWSER_HEADLESS",
+        "LinkedIn Headless",
+        "Paths and LinkedIn",
+        help="Use auto, true, or false. Auto is headless on Linux servers without DISPLAY.",
+    ),
     EnvField("JESSA_RESUME_DIR", "Resume Directory", "Paths and LinkedIn"),
     EnvField("JESSA_SQLITE_IMPORT_PATH", "Legacy SQLite Import Path", "Paths and LinkedIn"),
     EnvField("JESSA_PROFILE_SOURCE", "Profile Seed File", "Paths and LinkedIn"),

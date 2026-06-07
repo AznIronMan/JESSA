@@ -2,7 +2,13 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.2.5`
+Current version: `3.2.6`
+
+## v3.2.6 Scope
+
+- LinkedIn URL imports now default to headless mode on Linux servers without `DISPLAY` or `WAYLAND_DISPLAY`.
+- Added `JESSA_LINKEDIN_BROWSER_HEADLESS` so production can override LinkedIn persistent browser mode separately from rendered imports.
+- Documented the 10.0.10.117 production instance and the need to deploy repo changes there.
 
 ## v3.2.5 Scope
 
@@ -183,10 +189,16 @@ rm -f /tmp/google-chrome-stable_current_amd64.deb
 
 The app automatically uses `google-chrome`, `google-chrome-stable`, `chromium`, or `chromium-browser` when present on `PATH`.
 
-Rendered imports default to headless mode on Linux servers when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set. Override that behavior when needed:
+Rendered and LinkedIn imports default to headless mode on Linux servers when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set. Override rendered imports when needed:
 
 ```bash
 JESSA_PLAYWRIGHT_RENDERED_HEADLESS=false
+```
+
+Override the LinkedIn persistent browser separately when an interactive display or Xvfb session is available:
+
+```bash
+JESSA_LINKEDIN_BROWSER_HEADLESS=false
 ```
 
 On macOS, the app will automatically use Google Chrome when it is installed at:
@@ -351,9 +363,13 @@ Google Workspace notes:
 
 ## Usage
 
+### Production
+
+The live production JESSA instance runs at `http://10.0.10.117:9122`. Code and configuration updates committed in this repo should also be deployed to that host before considering production fixed.
+
 ### Jobs
 
-Paste a job URL and click `Import`. LinkedIn URLs automatically select the `LinkedIn` import mode, which opens a visible browser using the server-side `data/linkedin-browser` profile so sign-in state can be reused. If a non-LinkedIn page is heavily dynamic, choose `Rendered`; this uses a server-side Playwright browser session and can run headless on display-less Linux services. If URL import fails, paste the job text and use `Import Text`.
+Paste a job URL and click `Import`. LinkedIn URLs automatically select the `LinkedIn` import mode, which uses the server-side `data/linkedin-browser` profile so sign-in state can be reused. On display-less Linux services this browser runs headless by default. If LinkedIn requires a fresh sign-in, authenticate the persistent profile from an interactive server session or run with a display/Xvfb and `JESSA_LINKEDIN_BROWSER_HEADLESS=false`. If a non-LinkedIn page is heavily dynamic, choose `Rendered`; this uses a server-side Playwright browser session and can run headless on display-less Linux services. If URL import fails, paste the job text and use `Import Text`.
 
 Select a job on the left, review/edit fields, then click `Analyze`. JESSA updates the match metrics, salary target, resume base, resume notes, and cover letter, then creates tailored resume and cover-letter artifacts automatically.
 
@@ -415,6 +431,7 @@ This project uses semantic versioning.
 - `3.2.3`: Partners in Diversity importer coverage without data model changes.
 - `3.2.4`: Hey Health Tech importer coverage without data model changes.
 - `3.2.5`: Playwright browser deployment checks, server install guidance, and headless rendered imports.
+- `3.2.6`: Headless LinkedIn persistent browser defaults for display-less production servers.
 
 ## Roadmap
 
@@ -425,6 +442,13 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.2.6
+
+- Made LinkedIn job imports and LinkedIn profile cache fetches use the new `JESSA_LINKEDIN_BROWSER_HEADLESS` setting.
+- Defaulted LinkedIn persistent browser launches to headless mode on Linux services without `DISPLAY` or `WAYLAND_DISPLAY`.
+- Added clearer LinkedIn login guidance when the server-side browser is running headless.
+- Documented the live `10.0.10.117` production instance.
 
 ### 3.2.5
 

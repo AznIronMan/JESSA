@@ -35,6 +35,11 @@ class EnvSettingsTests(unittest.TestCase):
             }
             self.assertEqual(access_fields["JESSA_PORT"]["kind"], "number")
 
+    def test_linkedin_headless_setting_is_exposed(self) -> None:
+        field_names = {field.name for field in env_settings.ENV_FIELDS}
+
+        self.assertIn("JESSA_LINKEDIN_BROWSER_HEADLESS", field_names)
+
 
 if __name__ == "__main__":
     unittest.main()
