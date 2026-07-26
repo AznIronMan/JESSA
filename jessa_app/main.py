@@ -1742,8 +1742,25 @@ def import_artifact(job_id: int, request: ArtifactImportRequest) -> dict[str, An
             "artifact_imported",
             f"Synced exact {request.artifact_type} artifact #{artifact_id} ({request.artifact_status}).",
         )
+        artifact = _artifact(conn, artifact_id)
         return {
-            "artifact": _artifact(conn, artifact_id),
+            "artifact": {
+                key: artifact.get(key)
+                for key in (
+                    "id",
+                    "job_id",
+                    "artifact_type",
+                    "title",
+                    "version",
+                    "artifact_status",
+                    "is_submitted",
+                    "submitted_at",
+                    "source_path",
+                    "source_sha256",
+                    "created_at",
+                    "updated_at",
+                )
+            },
             "file": file_metadata,
         }
 
