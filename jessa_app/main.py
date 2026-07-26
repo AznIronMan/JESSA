@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
 from io import BytesIO
@@ -33,6 +35,14 @@ from .db import (
 )
 from .defaults import DEFAULT_CORE_PROFILE
 from .env_settings import settings_payload, update_env_values
+from .evidence import (
+    VALID_CLAIM_STATUSES,
+    VALID_CONFIDENTIALITY,
+    VALID_SCOPES,
+    build_evidence_context,
+    ranked_evidence,
+    visible_evidence,
+)
 from .services.email_client import classify, match_job, sync_inbox, test_smtp
 from .services.importer import ImportedJob, fetch_linkedin_profile, import_from_text, import_from_url
 from .services.llm import analyze_job, answer_supplemental_questions, generate_application_package
@@ -114,6 +124,8 @@ class ImportRequest(BaseModel):
 
 class ProfileUpdate(BaseModel):
     content: str
+    source_path: str = ""
+    source_sha256: str = ""
 
 
 class SettingsUpdate(BaseModel):
@@ -149,6 +161,47 @@ class ArtifactUpdate(BaseModel):
     title: str | None = None
     content: str | None = None
     is_submitted: bool | None = None
+    artifact_status: str | None = None
+
+
+class EvidenceChunkInput(BaseModel):
+    external_id: str
+    scope: str
+    job_id: int | None = None
+    title: str = ""
+    category: str = ""
+    employer: str = ""
+    tags: list[str] = []
+    claim_status: str = "verified"
+    confidentiality: str = "reusable"
+    source_path: str = ""
+    source_heading: str = ""
+    source_line_start: int | None = None
+    source_line_end: int | None = None
+    source_sha256: str = ""
+    content: str
+    content_sha256: str
+    artifact_type: str = ""
+
+
+class EvidenceSyncRequest(BaseModel):
+    schema_version: str
+    sources: list[dict[str, Any]]
+    chunks: list[EvidenceChunkInput]
+    bundle_sha256: str = ""
+
+
+class ArtifactImportRequest(BaseModel):
+    artifact_type: str
+    title: str
+    content: str = ""
+    is_submitted: bool = False
+    artifact_status: str = "current"
+    source_path: str = ""
+    source_sha256: str = ""
+    filename: str = ""
+    media_type: str = "application/octet-stream"
+    file_base64: str = ""
 
 
 class BulkJobRequest(BaseModel):
@@ -397,7 +450,7 @@ def _is_default_profile(content: str) -> bool:
 
 
 def _runtime_counts(conn) -> dict[str, int]:
-    tables = ("jobs", "application_artifacts", "emails")
+    tables = ("jobs", "application_artifacts", "emails", "evidence_chunks")
     counts: dict[str, int] = {}
     for table in tables:
         row = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
@@ -438,24 +491,68 @@ def _upsert_linkedin_profile(conn, url: str, title: str, content: str, fetched_a
     return _linkedin_profile(conn)
 
 
-def _profile_context(conn) -> tuple[dict[str, Any], str]:
+def _evidence_rows(conn, job_id: int | None = None) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = "active = 1 AND scope = 'global'"
+    if job_id is not None:
+        where = "active = 1 AND (scope = 'global' OR (scope = 'job' AND job_id = ?))"
+        params.append(job_id)
+    rows = rows_to_dicts(
+        conn.execute(
+            f"""
+            SELECT id, external_id, scope, job_id, title, category, employer,
+                   tags_json, claim_status, confidentiality, source_path,
+                   source_heading, source_line_start, source_line_end,
+                   source_sha256, content, content_sha256, artifact_type,
+                   active, created_at, updated_at
+            FROM evidence_chunks
+            WHERE {where}
+            """,
+            params,
+        ).fetchall()
+    )
+    for row in rows:
+        try:
+            row["tags"] = json.loads(str(row.pop("tags_json", "[]") or "[]"))
+        except json.JSONDecodeError:
+            row["tags"] = []
+    return visible_evidence(rows, job_id)
+
+
+def _job_query(job: dict[str, Any]) -> str:
+    return "\n".join(
+        str(job.get(key) or "")
+        for key in ("title", "company", "location", "description", "analysis_summary", "resume_notes")
+    )
+
+
+def _profile_context(conn, job: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
     profile = _profile(conn)
     linkedin = _linkedin_profile(conn)
-    profile_text = str(profile["content"])
+    profile_text = str(profile["content"])[:18000]
+    if job is not None:
+        evidence = build_evidence_context(
+            _evidence_rows(conn, int(job["id"])),
+            _job_query(job),
+        )
+        if evidence.strip():
+            profile_text = f"{profile_text}\n\n{evidence}"
     linkedin_content = str(linkedin.get("content") or "").strip()
     if linkedin_content:
         profile_text = (
             f"{profile_text}\n\n"
-            "# Cached LinkedIn Profile Context\n\n"
+            "# Secondary Cached LinkedIn Context — May Be Stale\n\n"
+            "This is a historical/public snapshot. It may contain stale titles, dates, or positioning. "
+            "Never let it override the canonical core profile, retrieved evidence, or claim controls.\n\n"
             f"Source URL: {linkedin.get('url') or 'Not recorded'}\n"
             f"Cached At: {linkedin.get('fetched_at') or linkedin.get('updated_at') or 'Not recorded'}\n\n"
-            f"{linkedin_content}"
+            f"{linkedin_content[:3500]}"
         )
     return profile, profile_text
 
 
-def _llm_context(conn) -> tuple[dict[str, Any], str, str]:
-    profile, profile_text = _profile_context(conn)
+def _llm_context(conn, job: dict[str, Any] | None = None) -> tuple[dict[str, Any], str, str]:
+    profile, profile_text = _profile_context(conn, job)
     return profile, profile_text, get_app_prompt(conn)
 
 
@@ -549,6 +646,25 @@ def _job_details(conn, job_id: int) -> dict[str, Any]:
     job["events"] = rows_to_dicts(events)
     job["emails"] = _email_rows_to_dicts(emails)
     job["artifacts"] = rows_to_dicts(artifacts)
+    if job["artifacts"]:
+        artifact_ids = [int(item["id"]) for item in job["artifacts"]]
+        placeholders = ", ".join("?" for _ in artifact_ids)
+        files = rows_to_dicts(
+            conn.execute(
+                f"""
+                SELECT id, artifact_id, filename, media_type, byte_size, sha256, created_at
+                FROM artifact_files
+                WHERE artifact_id IN ({placeholders})
+                ORDER BY id
+                """,
+                artifact_ids,
+            ).fetchall()
+        )
+        files_by_artifact: dict[int, list[dict[str, Any]]] = {}
+        for item in files:
+            files_by_artifact.setdefault(int(item["artifact_id"]), []).append(item)
+        for artifact in job["artifacts"]:
+            artifact["files"] = files_by_artifact.get(int(artifact["id"]), [])
     return job
 
 
@@ -744,10 +860,201 @@ def update_profile(update: ProfileUpdate) -> dict[str, Any]:
         current = _profile(conn)
         version = int(current["version"]) + 1
         conn.execute(
-            "UPDATE core_profile SET content = ?, version = ?, updated_at = ? WHERE id = 1",
-            (update.content, version, utc_now()),
+            """
+            UPDATE core_profile
+            SET content = ?, version = ?, updated_at = ?,
+                source_path = ?, source_sha256 = ?, synced_at = ?
+            WHERE id = 1
+            """,
+            (
+                update.content,
+                version,
+                utc_now(),
+                update.source_path.strip(),
+                update.source_sha256.strip(),
+                utc_now() if update.source_path.strip() or update.source_sha256.strip() else None,
+            ),
         )
         return _profile(conn)
+
+
+@app.put("/api/evidence/sync")
+def sync_evidence(request: EvidenceSyncRequest) -> dict[str, Any]:
+    if not request.schema_version.strip():
+        raise HTTPException(status_code=400, detail="Evidence schema_version is required.")
+    source_ids = {
+        str(source.get("source_id") or "").strip()
+        for source in request.sources
+        if str(source.get("source_id") or "").strip()
+    }
+    if not source_ids or not request.chunks:
+        raise HTTPException(status_code=400, detail="Evidence sources and chunks are required.")
+    for source in request.sources:
+        if ".private" in str(source.get("path") or "").replace("\\", "/").split("/"):
+            raise HTTPException(status_code=422, detail="Private sources cannot be synced.")
+    now = utc_now()
+    with get_db() as conn:
+        conn.execute("UPDATE evidence_chunks SET active = 0, updated_at = ?", (now,))
+        for chunk in request.chunks:
+            if ".private" in chunk.source_path.replace("\\", "/").split("/"):
+                raise HTTPException(status_code=422, detail="Private sources cannot be synced.")
+            if chunk.scope not in VALID_SCOPES:
+                raise HTTPException(status_code=422, detail=f"Invalid scope for {chunk.external_id}.")
+            if chunk.claim_status not in VALID_CLAIM_STATUSES:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Invalid claim_status for {chunk.external_id}.",
+                )
+            if chunk.confidentiality not in VALID_CONFIDENTIALITY:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Invalid confidentiality for {chunk.external_id}.",
+                )
+            if chunk.scope == "job" and not chunk.job_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Job-scoped evidence lacks job_id: {chunk.external_id}.",
+                )
+            if chunk.scope == "global" and chunk.confidentiality != "reusable":
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Global evidence must be reusable: {chunk.external_id}.",
+                )
+            content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
+            if content_hash != chunk.content_sha256:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Content hash mismatch for {chunk.external_id}.",
+                )
+            conn.execute(
+                """
+                INSERT INTO evidence_chunks (
+                    external_id, scope, job_id, title, category, employer, tags_json,
+                    claim_status, confidentiality, source_path, source_heading,
+                    source_line_start, source_line_end, source_sha256, content,
+                    content_sha256, artifact_type, active, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT (external_id) DO UPDATE SET
+                    scope = EXCLUDED.scope,
+                    job_id = EXCLUDED.job_id,
+                    title = EXCLUDED.title,
+                    category = EXCLUDED.category,
+                    employer = EXCLUDED.employer,
+                    tags_json = EXCLUDED.tags_json,
+                    claim_status = EXCLUDED.claim_status,
+                    confidentiality = EXCLUDED.confidentiality,
+                    source_path = EXCLUDED.source_path,
+                    source_heading = EXCLUDED.source_heading,
+                    source_line_start = EXCLUDED.source_line_start,
+                    source_line_end = EXCLUDED.source_line_end,
+                    source_sha256 = EXCLUDED.source_sha256,
+                    content = EXCLUDED.content,
+                    content_sha256 = EXCLUDED.content_sha256,
+                    artifact_type = EXCLUDED.artifact_type,
+                    active = 1,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (
+                    chunk.external_id,
+                    chunk.scope,
+                    chunk.job_id,
+                    chunk.title,
+                    chunk.category,
+                    chunk.employer,
+                    json.dumps(chunk.tags, sort_keys=True),
+                    chunk.claim_status,
+                    chunk.confidentiality,
+                    chunk.source_path,
+                    chunk.source_heading,
+                    chunk.source_line_start,
+                    chunk.source_line_end,
+                    chunk.source_sha256,
+                    chunk.content,
+                    chunk.content_sha256,
+                    chunk.artifact_type,
+                    now,
+                    now,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO evidence_sync_runs (
+                schema_version, source_count, chunk_count, bundle_sha256, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                request.schema_version,
+                len(source_ids),
+                len(request.chunks),
+                request.bundle_sha256.strip(),
+                now,
+            ),
+        )
+        return _evidence_coverage(conn)
+
+
+def _evidence_coverage(conn) -> dict[str, Any]:
+    counts = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE active = 1) AS active,
+            COUNT(*) FILTER (WHERE active = 1 AND scope = 'global') AS global_chunks,
+            COUNT(*) FILTER (WHERE active = 1 AND scope = 'job') AS job_chunks,
+            COUNT(*) FILTER (WHERE active = 1 AND confidentiality = 'job_confidential') AS job_confidential,
+            COUNT(*) FILTER (WHERE active = 1 AND claim_status = 'do_not_claim') AS do_not_claim,
+            COUNT(DISTINCT category) FILTER (WHERE active = 1) AS sources
+        FROM evidence_chunks
+        """
+    ).fetchone()
+    latest = conn.execute(
+        "SELECT * FROM evidence_sync_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return {
+        "counts": dict(counts or {}),
+        "latest_sync": dict(latest or {}),
+    }
+
+
+@app.get("/api/evidence/coverage")
+def evidence_coverage() -> dict[str, Any]:
+    with get_db() as conn:
+        return _evidence_coverage(conn)
+
+
+@app.get("/api/evidence")
+def search_evidence(
+    q: str = "",
+    scope: str = "all",
+    job_id: int | None = None,
+    category: str = "",
+    claim_status: str = "",
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    if scope not in {"all", *VALID_SCOPES}:
+        raise HTTPException(status_code=400, detail="Unknown evidence scope.")
+    if claim_status and claim_status not in VALID_CLAIM_STATUSES:
+        raise HTTPException(status_code=400, detail="Unknown claim status.")
+    limit = max(1, min(int(limit), 100))
+    with get_db() as conn:
+        items = _evidence_rows(conn, job_id)
+    if scope != "all":
+        items = [item for item in items if item.get("scope") == scope]
+    if category:
+        items = [item for item in items if item.get("category") == category]
+    if claim_status:
+        items = [item for item in items if item.get("claim_status") == claim_status]
+    if q.strip():
+        return ranked_evidence(items, q, limit=limit)
+    return sorted(
+        items,
+        key=lambda item: (
+            str(item.get("scope") or ""),
+            str(item.get("category") or ""),
+            str(item.get("source_heading") or ""),
+        ),
+    )[:limit]
 
 
 def _decode_profile_upload(upload: UploadFile, data: bytes) -> str:
@@ -1155,10 +1462,10 @@ def recover_job(job_id: int) -> dict[str, Any]:
 
 
 @app.post("/api/jobs/{job_id}/analyze")
-def analyze(job_id: int) -> dict[str, Any]:
+def analyze(job_id: int, generate_package: bool = True) -> dict[str, Any]:
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile, profile_text, app_prompt = _llm_context(conn)
+        profile, profile_text, app_prompt = _llm_context(conn, job)
         result = analyze_job(job, profile_text, app_prompt)
         payload = result.model_dump()
         conn.execute(
@@ -1188,6 +1495,8 @@ def analyze(job_id: int) -> dict[str, Any]:
             ),
         )
         log_event(conn, job_id, "analyzed", f"{payload['match_score']}% {payload['recommendation']}")
+        if not generate_package:
+            return _job_details(conn, job_id)
         updated_job = _get_job(conn, job_id)
         package = generate_application_package(updated_job, profile_text, payload, app_prompt)
         resume_id = _insert_artifact(
@@ -1223,7 +1532,7 @@ def analyze(job_id: int) -> dict[str, Any]:
 def generate_package(job_id: int) -> dict[str, Any]:
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile, profile_text, app_prompt = _llm_context(conn)
+        profile, profile_text, app_prompt = _llm_context(conn, job)
         package = generate_application_package(
             job,
             profile_text,
@@ -1260,7 +1569,7 @@ def generate_supplemental(job_id: int, request: SupplementalRequest) -> dict[str
         raise HTTPException(status_code=400, detail="Paste at least one supplemental question.")
     with get_db() as conn:
         job = _get_job(conn, job_id)
-        profile, profile_text, app_prompt = _llm_context(conn)
+        profile, profile_text, app_prompt = _llm_context(conn, job)
         artifacts = rows_to_dicts(
             conn.execute(
                 """
@@ -1293,6 +1602,14 @@ def generate_supplemental(job_id: int, request: SupplementalRequest) -> dict[str
 @app.put("/api/artifacts/{artifact_id}")
 def update_artifact(artifact_id: int, update: ArtifactUpdate) -> dict[str, Any]:
     allowed = update.model_dump(exclude_unset=True)
+    if allowed.get("artifact_status") and allowed["artifact_status"] not in {
+        "draft",
+        "current",
+        "submitted",
+        "reference",
+        "superseded",
+    }:
+        raise HTTPException(status_code=422, detail="Unknown artifact_status.")
     if not allowed:
         with get_db() as conn:
             return _artifact(conn, artifact_id)
@@ -1306,6 +1623,9 @@ def update_artifact(artifact_id: int, update: ArtifactUpdate) -> dict[str, Any]:
                 values.append(1 if value else 0)
                 fields.append("submitted_at = ?")
                 values.append(utc_now() if value else None)
+                if value and "artifact_status" not in allowed:
+                    fields.append("artifact_status = ?")
+                    values.append("submitted")
             else:
                 fields.append(f"{key} = ?")
                 values.append(value or "")
@@ -1318,6 +1638,138 @@ def update_artifact(artifact_id: int, update: ArtifactUpdate) -> dict[str, Any]:
         else:
             log_event(conn, int(artifact["job_id"]), "artifact_edited", artifact["title"])
         return _artifact(conn, artifact_id)
+
+
+@app.post("/api/jobs/{job_id}/artifacts/import")
+def import_artifact(job_id: int, request: ArtifactImportRequest) -> dict[str, Any]:
+    if not request.artifact_type.strip() or not request.title.strip():
+        raise HTTPException(status_code=400, detail="artifact_type and title are required.")
+    if request.artifact_status not in {"draft", "current", "submitted", "reference", "superseded"}:
+        raise HTTPException(status_code=422, detail="Unknown artifact_status.")
+    with get_db() as conn:
+        _get_job(conn, job_id)
+        profile = _profile(conn)
+        submitted = request.is_submitted or request.artifact_status == "submitted"
+        existing = None
+        if request.source_sha256.strip():
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM application_artifacts
+                WHERE job_id = ? AND artifact_type = ? AND source_sha256 = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (
+                    job_id,
+                    request.artifact_type.strip(),
+                    request.source_sha256.strip(),
+                ),
+            ).fetchone()
+        if existing:
+            artifact_id = int(existing["id"])
+        else:
+            artifact_id = _insert_artifact(
+                conn,
+                job_id,
+                request.artifact_type.strip(),
+                request.title.strip(),
+                request.content,
+                int(profile["version"]),
+            )
+        conn.execute(
+            """
+            UPDATE application_artifacts
+            SET title = ?, content = ?, artifact_status = ?, source_path = ?, source_sha256 = ?,
+                is_submitted = ?, submitted_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                request.title.strip(),
+                request.content,
+                request.artifact_status,
+                request.source_path.strip(),
+                request.source_sha256.strip(),
+                1 if submitted else 0,
+                utc_now() if submitted else None,
+                utc_now(),
+                artifact_id,
+            ),
+        )
+        file_metadata = None
+        if request.file_base64:
+            try:
+                data = base64.b64decode(request.file_base64, validate=True)
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail="Invalid file_base64.") from exc
+            if not request.filename.strip():
+                raise HTTPException(status_code=422, detail="filename is required with file_base64.")
+            file_hash = hashlib.sha256(data).hexdigest()
+            if request.source_sha256 and request.source_sha256 != file_hash:
+                raise HTTPException(status_code=422, detail="Artifact file hash does not match source_sha256.")
+            row = conn.execute(
+                """
+                INSERT INTO artifact_files (
+                    artifact_id, filename, media_type, byte_size, sha256, content, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (artifact_id, sha256) DO NOTHING
+                RETURNING id, artifact_id, filename, media_type, byte_size, sha256, created_at
+                """,
+                (
+                    artifact_id,
+                    request.filename.strip(),
+                    request.media_type.strip() or "application/octet-stream",
+                    len(data),
+                    file_hash,
+                    data,
+                    utc_now(),
+                ),
+            ).fetchone()
+            if not row:
+                row = conn.execute(
+                    """
+                    SELECT id, artifact_id, filename, media_type, byte_size, sha256, created_at
+                    FROM artifact_files
+                    WHERE artifact_id = ? AND sha256 = ?
+                    """,
+                    (artifact_id, file_hash),
+                ).fetchone()
+            file_metadata = dict(row or {})
+        log_event(
+            conn,
+            job_id,
+            "artifact_imported",
+            f"Synced exact {request.artifact_type} artifact #{artifact_id} ({request.artifact_status}).",
+        )
+        return {
+            "artifact": _artifact(conn, artifact_id),
+            "file": file_metadata,
+        }
+
+
+@app.get("/api/artifacts/{artifact_id}/file")
+def download_artifact_file(artifact_id: int) -> Response:
+    with get_db() as conn:
+        _artifact(conn, artifact_id)
+        row = conn.execute(
+            """
+            SELECT filename, media_type, content
+            FROM artifact_files
+            WHERE artifact_id = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (artifact_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Artifact has no stored source file.")
+    filename = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(row["filename"])).strip("-")
+    return Response(
+        bytes(row["content"]),
+        media_type=str(row["media_type"] or "application/octet-stream"),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/artifacts/{artifact_id}/download.pdf")

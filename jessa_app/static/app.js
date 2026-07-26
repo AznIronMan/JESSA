@@ -6,6 +6,8 @@ const state = {
   jobView: "active",
   jobStatusFilter: "all",
   selectedJobIds: new Set(),
+  evidenceCoverage: null,
+  evidence: [],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -566,6 +568,11 @@ function renderJobDetail(job) {
       window.open(`/api/artifacts/${button.dataset.downloadArtifact}/download.pdf`, "_blank", "noopener");
     });
   });
+  document.querySelectorAll("[data-source-artifact]").forEach((button) => {
+    button.addEventListener("click", () => {
+      window.open(`/api/artifacts/${button.dataset.sourceArtifact}/file`, "_blank", "noopener");
+    });
+  });
 }
 
 function artifactTypeLabel(type) {
@@ -586,9 +593,11 @@ function renderArtifacts(artifacts, actionsDisabled = "", contentLocked = "") {
         <div>
           <strong>${escapeHtml(artifactTypeLabel(artifact.artifact_type))}</strong>
           <span class="job-metadata">v${artifact.version} · ${escapeHtml(artifact.created_at || "")}</span>
+          <span class="badge">${escapeHtml(artifact.artifact_status || (artifact.is_submitted ? "submitted" : "draft"))}</span>
           ${artifact.is_submitted ? `<span class="badge good">submitted ${escapeHtml(artifact.submitted_at || "")}</span>` : `<span class="badge">draft</span>`}
         </div>
         <div class="artifact-actions">
+          ${(artifact.files || []).length ? `<button data-source-artifact="${artifact.id}">Source File</button>` : ""}
           <button data-download-artifact="${artifact.id}">PDF</button>
           <button data-save-artifact="${artifact.id}" ${actionsDisabled}>Save</button>
           <button data-submit-artifact="${artifact.id}" ${actionsDisabled}>Mark Submitted</button>
@@ -814,6 +823,51 @@ async function loadLinkedInProfile() {
     : "not cached";
 }
 
+async function loadEvidenceCoverage() {
+  state.evidenceCoverage = await api("/api/evidence/coverage");
+  const counts = state.evidenceCoverage.counts || {};
+  $("#evidence-library-status").textContent =
+    `${counts.active || 0} active · ${counts.global_chunks || 0} global · ` +
+    `${counts.job_chunks || 0} job-scoped · ${counts.do_not_claim || 0} claim prohibitions`;
+}
+
+function renderEvidence() {
+  const target = $("#evidence-results");
+  if (!target) return;
+  target.innerHTML = state.evidence.length
+    ? state.evidence.map((item) => `
+      <article class="evidence-card">
+        <div class="evidence-card-header">
+          <strong>${escapeHtml(item.source_heading || item.title || "Evidence")}</strong>
+          <div>
+            <span class="badge">${escapeHtml(item.scope || "")}</span>
+            <span class="badge ${item.claim_status === "do_not_claim" ? "bad" : ""}">${escapeHtml(item.claim_status || "")}</span>
+          </div>
+        </div>
+        <div class="job-metadata">
+          ${escapeHtml([item.employer, item.category, (item.tags || []).join(", ")].filter(Boolean).join(" · "))}
+        </div>
+        <p>${escapeHtml(String(item.content || "").slice(0, 900))}${String(item.content || "").length > 900 ? "…" : ""}</p>
+      </article>
+    `).join("")
+    : `<div class="empty-state">No evidence matched. Job-scoped records require the matching JESSA job id.</div>`;
+}
+
+async function searchEvidence() {
+  const params = new URLSearchParams();
+  const query = $("#evidence-query").value.trim();
+  const scope = $("#evidence-scope").value;
+  const jobId = $("#evidence-job-id").value.trim();
+  const claimStatus = $("#evidence-claim-status").value;
+  if (query) params.set("q", query);
+  if (scope) params.set("scope", scope);
+  if (jobId) params.set("job_id", jobId);
+  if (claimStatus) params.set("claim_status", claimStatus);
+  params.set("limit", "40");
+  state.evidence = await api(`/api/evidence?${params.toString()}`);
+  renderEvidence();
+}
+
 async function saveProfile() {
   const profile = await api("/api/profile", {
     method: "PUT",
@@ -924,6 +978,7 @@ function setupTabs() {
       if (tab.dataset.tab === "profile") {
         await loadProfile();
         await loadLinkedInProfile();
+        await loadEvidenceCoverage();
       }
       if (tab.dataset.tab === "email") await loadEmails();
     });
@@ -970,6 +1025,10 @@ function setupActions() {
     $("#linkedin-profile-status").textContent = "cache failed";
     toast(error.message);
   }));
+  $("#search-evidence").addEventListener("click", () => searchEvidence().catch((error) => toast(error.message)));
+  $("#evidence-query").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") searchEvidence().catch((error) => toast(error.message));
+  });
   $("#open-settings").addEventListener("click", () => openSettings().catch((error) => toast(error.message)));
   $("#close-settings").addEventListener("click", closeSettings);
   $("#settings-modal").addEventListener("click", (event) => {
@@ -1002,6 +1061,7 @@ setupActions();
       showTab("profile");
       await loadProfile();
       await loadLinkedInProfile();
+      await loadEvidenceCoverage();
       return;
     }
     await loadJobs();

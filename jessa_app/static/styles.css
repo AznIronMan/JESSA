@@ -32,6 +32,66 @@ textarea {
   font: inherit;
 }
 
+.evidence-library-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.evidence-help {
+  margin: 0;
+  color: var(--muted);
+}
+
+.evidence-search-controls {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) 190px 140px 170px;
+  gap: 8px;
+}
+
+.evidence-search-controls input,
+.evidence-search-controls select {
+  min-width: 0;
+  height: 36px;
+  padding: 0 9px;
+}
+
+.evidence-results {
+  display: grid;
+  gap: 8px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.evidence-card {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fbfcfd;
+  padding: 10px;
+}
+
+.evidence-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.evidence-card p {
+  margin: 7px 0 0;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  .evidence-search-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 button {
   min-height: 36px;
   border: 1px solid var(--line);

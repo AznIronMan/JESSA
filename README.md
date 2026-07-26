@@ -2,7 +2,17 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.2.6`
+Current version: `3.3.0`
+
+## v3.3.0 Scope
+
+- Added a scoped Career Evidence Library with idempotent bundle sync, source hashes, stable external ids, claim states, confidentiality states, and global-versus-job isolation.
+- Job analysis, application-package generation, and supplemental answers now retrieve only relevant global evidence plus the current job's evidence.
+- Cached LinkedIn content is explicitly secondary and bounded so stale titles or dates cannot override the canonical profile and claim controls.
+- Added evidence coverage and search APIs plus a Core Profile evidence-search panel.
+- Added exact artifact import with source PDF/DOCX storage, SHA-256 validation, submission/reference/superseded states, and source-file download.
+- Analysis can run without automatically generating a new resume and cover letter by using `generate_package=false`.
+- Added canonical-profile source path/hash metadata for traceable Codex Search synchronization.
 
 ## v3.2.6 Scope
 
@@ -432,6 +442,7 @@ This project uses semantic versioning.
 - `3.2.4`: Hey Health Tech importer coverage without data model changes.
 - `3.2.5`: Playwright browser deployment checks, server install guidance, and headless rendered imports.
 - `3.2.6`: Headless LinkedIn persistent browser defaults for display-less production servers.
+- `3.3.0`: Scoped career evidence, canonical precedence, exact artifact import, and evidence-aware generation.
 
 ## Roadmap
 
@@ -442,6 +453,16 @@ This project uses semantic versioning.
 - Feedback loop that compares match scores against actual interview outcomes.
 
 ## Changelog
+
+### 3.3.0
+
+- Added idempotent global/job evidence synchronization and source coverage metadata.
+- Added job-isolated evidence retrieval for analysis, application packages, and supplemental answers.
+- Added claim-state and confidentiality enforcement, including do-not-claim prompt controls.
+- Made cached LinkedIn context secondary to canonical profile/evidence and bounded its prompt contribution.
+- Added searchable evidence UI and coverage endpoints.
+- Added idempotent exact-artifact import, SHA-256 validation, stored source-file download, and artifact lifecycle states.
+- Added analysis-only mode with `generate_package=false`.
 
 ### 3.2.6
 
@@ -592,6 +613,27 @@ This project uses semantic versioning.
 ### 1.0.0
 
 - Initial local app with job import, analysis, core profile editing, and email sync.
+
+## Evidence API And Precedence
+
+Sync a canonical evidence bundle with `PUT /api/evidence/sync`. Search it with `GET /api/evidence`; without `job_id`, JESSA returns global evidence only. With a job id, JESSA may return global evidence plus evidence scoped to that exact job.
+
+```bash
+curl -s 'http://10.0.10.117:9122/api/evidence?q=healthcare%20governance&job_id=655'
+curl -s http://10.0.10.117:9122/api/evidence/coverage
+curl -s -X POST 'http://10.0.10.117:9122/api/jobs/655/analyze?generate_package=false'
+```
+
+Exact application artifacts can be imported with `POST /api/jobs/<id>/artifacts/import`. The JSON request supports Markdown content plus an optional base64-encoded source file. JESSA validates the file against `source_sha256` and stores the source for retrieval at `/api/artifacts/<artifact_id>/file`.
+
+JESSA treats the Core Profile as the concise canonical identity/timeline layer. Evidence precedence is:
+
+1. Latest direct candidate confirmation.
+2. Approved final artifacts based on those confirmations.
+3. Historical resumes, portfolio pages, profile exports, or LinkedIn.
+4. Public research or inference.
+
+Global evidence is reusable. Job evidence is visible only when the matching job id is explicitly selected. Job-confidential evidence cannot be synced as global. `do_not_claim` records are prompt prohibitions, and `qualified` records must preserve their stored boundary.
 
 ## Sources
 

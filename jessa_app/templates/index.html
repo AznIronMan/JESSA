@@ -125,6 +125,36 @@
           <input id="linkedin-profile-title" placeholder="Profile title" />
           <textarea id="linkedin-profile-cache" placeholder="Paste the candidate's LinkedIn profile text or cache it from the URL"></textarea>
         </section>
+        <section class="evidence-library-panel">
+          <div class="section-title-row">
+            <div>
+              <h2>Career Evidence Library</h2>
+              <span id="evidence-library-status">not loaded</span>
+            </div>
+            <button id="search-evidence">Search Evidence</button>
+          </div>
+          <p class="evidence-help">
+            Global evidence is reusable. Job evidence is visible only when its JESSA job id is supplied.
+            Qualified and do-not-claim records control how generated materials may describe experience.
+          </p>
+          <div class="evidence-search-controls">
+            <input id="evidence-query" placeholder="Search employers, domains, platforms, requirements, or stories" />
+            <select id="evidence-scope">
+              <option value="all">Global + selected job</option>
+              <option value="global">Global only</option>
+              <option value="job">Selected job only</option>
+            </select>
+            <input id="evidence-job-id" type="number" min="1" placeholder="JESSA job id" />
+            <select id="evidence-claim-status">
+              <option value="">All claim states</option>
+              <option value="verified">Verified</option>
+              <option value="qualified">Qualified</option>
+              <option value="do_not_claim">Do not claim</option>
+              <option value="context_only">Context only</option>
+            </select>
+          </div>
+          <div class="evidence-results" id="evidence-results"></div>
+        </section>
         <textarea id="profile-editor"></textarea>
       </section>
     </main>
