@@ -2,7 +2,13 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.3.0`
+Current version: `3.3.1`
+
+## v3.3.1 Scope
+
+- Preserved higher-value referral and internal leadership context ahead of long
+  candidate-profile reference exports within the exact-job confidential prompt
+  budget.
 
 ## v3.3.0 Scope
 
@@ -443,6 +449,7 @@ This project uses semantic versioning.
 - `3.2.5`: Playwright browser deployment checks, server install guidance, and headless rendered imports.
 - `3.2.6`: Headless LinkedIn persistent browser defaults for display-less production servers.
 - `3.3.0`: Scoped career evidence, canonical precedence, exact artifact import, and evidence-aware generation.
+- `3.3.1`: Exact-job confidential evidence prioritization for long reference artifacts.
 
 ## Roadmap
 
