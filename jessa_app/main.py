@@ -860,6 +860,12 @@ def get_profile() -> dict[str, Any]:
 def update_profile(update: ProfileUpdate) -> dict[str, Any]:
     with get_db() as conn:
         current = _profile(conn)
+        if (
+            str(current.get("content") or "") == update.content
+            and str(current.get("source_path") or "") == update.source_path.strip()
+            and str(current.get("source_sha256") or "") == update.source_sha256.strip()
+        ):
+            return current
         version = int(current["version"]) + 1
         conn.execute(
             """
