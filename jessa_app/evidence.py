@@ -116,6 +116,7 @@ def build_evidence_context(
     global_budget: int = 15000,
     job_budget: int = 8000,
     control_budget: int = 6500,
+    job_confidential_budget: int = 6500,
 ) -> str:
     """Build a bounded prompt section without crossing job evidence boundaries."""
     controls = [
@@ -124,11 +125,18 @@ def build_evidence_context(
         if item.get("claim_status") in {"qualified", "do_not_claim"}
         or item.get("category") == "claim-controls"
     ]
+    job_confidential = [
+        item
+        for item in items
+        if item.get("scope") == "job"
+        and item.get("confidentiality") == "job_confidential"
+    ]
     positive = [
         item
         for item in items
         if item.get("claim_status") not in {"do_not_claim"}
         and item.get("category") not in {"canonical-profile", "claim-controls"}
+        and item.get("confidentiality") != "job_confidential"
     ]
     ranked_controls = ranked_evidence(controls, query, limit=14)
     ranked_global = ranked_evidence(
@@ -140,6 +148,11 @@ def build_evidence_context(
         [item for item in positive if item.get("scope") == "job"],
         query,
         limit=20,
+    )
+    relevant_confidential = ranked_evidence(job_confidential, query, limit=len(job_confidential))
+    seen_confidential = {item["external_id"] for item in relevant_confidential}
+    relevant_confidential.extend(
+        item for item in job_confidential if item["external_id"] not in seen_confidential
     )
 
     parts = [
@@ -159,6 +172,27 @@ def build_evidence_context(
                 f"{item.get('content') or ''}"
             )
             used = _append_with_budget(parts, label, used, control_budget)
+    if relevant_confidential:
+        parts.extend(
+            [
+                "",
+                "## Current-Job Confidential Context",
+                "Use only to understand and prepare for this exact opportunity. Do not quote, attribute, "
+                "or reuse this information for another employer.",
+            ]
+        )
+        used = 0
+        for item in relevant_confidential:
+            label = (
+                f"### {item.get('source_heading') or item.get('title')}\n"
+                f"{item.get('content') or ''}"
+            )
+            used = _append_with_budget(
+                parts,
+                label,
+                used,
+                job_confidential_budget,
+            )
     if ranked_global:
         parts.extend(["", "## Reusable Evidence"])
         used = 0

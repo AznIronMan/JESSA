@@ -17,6 +17,7 @@ def item(
     tags=None,
     claim_status="verified",
     category="career",
+    confidentiality="reusable",
 ):
     return {
         "external_id": external_id,
@@ -27,6 +28,7 @@ def item(
         "tags": tags or [],
         "claim_status": claim_status,
         "category": category,
+        "confidentiality": confidentiality,
         "source_heading": title,
         "employer": "",
     }
@@ -96,6 +98,22 @@ class EvidenceTests(unittest.TestCase):
         context = build_evidence_context(values, "internal referral")
         self.assertIn("Current-Job Evidence", context)
         self.assertIn("Never reuse it for another employer.", context)
+
+    def test_current_job_confidential_context_has_a_reserved_section(self):
+        values = [
+            item(
+                "confidential",
+                scope="job",
+                job_id=655,
+                title="CEO preference",
+                content="Internal current-job guidance.",
+                claim_status="context_only",
+                confidentiality="job_confidential",
+            )
+        ]
+        context = build_evidence_context(values, "unrelated public requirements")
+        self.assertIn("Current-Job Confidential Context", context)
+        self.assertIn("Internal current-job guidance.", context)
 
 
 if __name__ == "__main__":
