@@ -454,6 +454,12 @@ This project uses semantic versioning.
 
 ## Changelog
 
+### 3.3.1
+
+- Preserved higher-value referral and internal leadership context ahead of long
+  candidate-profile reference exports within the exact-job confidential prompt
+  budget.
+
 ### 3.3.0
 
 - Added idempotent global/job evidence synchronization and source coverage metadata.

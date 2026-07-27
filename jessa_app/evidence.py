@@ -154,6 +154,11 @@ def build_evidence_context(
     relevant_confidential.extend(
         item for item in job_confidential if item["external_id"] not in seen_confidential
     )
+    # Long candidate-profile exports are useful as exact-job references, but they
+    # must not consume the reserved budget before referral and internal context.
+    relevant_confidential.sort(
+        key=lambda item: item.get("artifact_type") == "candidate_profile_summary"
+    )
 
     parts = [
         "# Retrieved Career Evidence",

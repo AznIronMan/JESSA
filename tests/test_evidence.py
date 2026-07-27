@@ -115,6 +115,36 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("Current-Job Confidential Context", context)
         self.assertIn("Internal current-job guidance.", context)
 
+    def test_candidate_profile_summary_does_not_starve_referral_context(self):
+        candidate_profile = item(
+            "candidate-profile",
+            scope="job",
+            job_id=655,
+            title="Candidate profile",
+            content="ARC-PA leadership technology " * 500,
+            claim_status="context_only",
+            confidentiality="job_confidential",
+        )
+        candidate_profile["artifact_type"] = "candidate_profile_summary"
+        referral = item(
+            "referral-context",
+            scope="job",
+            job_id=655,
+            title="Referral context",
+            content="The CEO values practical options and clear results.",
+            claim_status="context_only",
+            confidentiality="job_confidential",
+        )
+        referral["artifact_type"] = "referral_note"
+
+        context = build_evidence_context(
+            [candidate_profile, referral],
+            "ARC-PA leadership technology",
+            job_confidential_budget=500,
+        )
+
+        self.assertIn("The CEO values practical options and clear results.", context)
+
 
 if __name__ == "__main__":
     unittest.main()
