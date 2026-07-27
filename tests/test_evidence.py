@@ -60,6 +60,7 @@ class EvidenceTests(unittest.TestCase):
         ]
         ranked = ranked_evidence(values, "Salesforce CRM governance")
         self.assertEqual(ranked[0]["external_id"], "salesforce")
+        self.assertEqual(ranked_evidence(values, "unrelated-secret-name"), [])
 
     def test_do_not_claim_is_present_as_a_control_not_positive_evidence(self):
         values = [

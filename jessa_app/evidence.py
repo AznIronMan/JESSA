@@ -50,7 +50,7 @@ def evidence_score(item: dict[str, Any], terms: Iterable[str]) -> float:
         if term in heading:
             score += 4.0
         score += min(content.count(term), 5) * 0.8
-    if item.get("claim_status") == "verified":
+    if score > 0 and item.get("claim_status") == "verified":
         score += 1.0
     return score
 
