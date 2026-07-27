@@ -143,6 +143,7 @@ class LinkedInProfileFetch(BaseModel):
 
 
 class JobUpdate(BaseModel):
+    url: str | None = None
     title: str | None = None
     company: str | None = None
     location: str | None = None
@@ -196,6 +197,7 @@ class ArtifactImportRequest(BaseModel):
     title: str
     content: str = ""
     is_submitted: bool = False
+    submitted_at: str = ""
     artifact_status: str = "current"
     source_path: str = ""
     source_sha256: str = ""
@@ -1691,7 +1693,7 @@ def import_artifact(job_id: int, request: ArtifactImportRequest) -> dict[str, An
                 request.source_path.strip(),
                 request.source_sha256.strip(),
                 1 if submitted else 0,
-                utc_now() if submitted else None,
+                (request.submitted_at.strip() or utc_now()) if submitted else None,
                 utc_now(),
                 artifact_id,
             ),
