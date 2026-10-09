@@ -45,6 +45,8 @@ from .evidence import (
 )
 from .services.email_client import classify, match_job, sync_inbox, test_smtp
 from .services.importer import ImportedJob, fetch_linkedin_profile, import_from_text, import_from_url
+from .career_context import assemble_context, BaselineId
+from .llm_routing import reset_trace, get_trace
 from .services.llm import analyze_job, answer_supplemental_questions, generate_application_package
 from .services.pdf import markdown_to_pdf
 
@@ -531,29 +533,16 @@ def _job_query(job: dict[str, Any]) -> str:
 def _profile_context(conn, job: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
     profile = _profile(conn)
     linkedin = _linkedin_profile(conn)
-    profile_text = str(profile["content"])[:18000]
+    profile_text = str(profile["content"])
     if job is not None:
-        evidence = build_evidence_context(
-            _evidence_rows(conn, int(job["id"])),
-            _job_query(job),
-        )
-        if evidence.strip():
-            profile_text = f"{profile_text}\n\n{evidence}"
-    linkedin_content = str(linkedin.get("content") or "").strip()
-    if linkedin_content:
-        profile_text = (
-            f"{profile_text}\n\n"
-            "# Secondary Cached LinkedIn Context — May Be Stale\n\n"
-            "This is a historical/public snapshot. It may contain stale titles, dates, or positioning. "
-            "Never let it override the canonical core profile, retrieved evidence, or claim controls.\n\n"
-            f"Source URL: {linkedin.get('url') or 'Not recorded'}\n"
-            f"Cached At: {linkedin.get('fetched_at') or linkedin.get('updated_at') or 'Not recorded'}\n\n"
-            f"{linkedin_content[:3500]}"
-        )
+        profile_text = assemble_context(profile_text, _evidence_rows(conn, int(job["id"])), job,
+            "Secondary cached LinkedIn; never overrides canonical facts.\n" + str(linkedin.get("content") or ""),
+            override=job.get("baseline_override"))
     return profile, profile_text
 
 
 def _llm_context(conn, job: dict[str, Any] | None = None) -> tuple[dict[str, Any], str, str]:
+    reset_trace()
     profile, profile_text = _profile_context(conn, job)
     return profile, profile_text, get_app_prompt(conn)
 
@@ -1476,6 +1465,7 @@ def analyze(job_id: int, generate_package: bool = True) -> dict[str, Any]:
         profile, profile_text, app_prompt = _llm_context(conn, job)
         result = analyze_job(job, profile_text, app_prompt)
         payload = result.model_dump()
+        log_event(conn, job_id, "llm_trace", json.dumps(get_trace()))
         conn.execute(
             """
             UPDATE jobs
@@ -1506,7 +1496,11 @@ def analyze(job_id: int, generate_package: bool = True) -> dict[str, Any]:
         if not generate_package:
             return _job_details(conn, job_id)
         updated_job = _get_job(conn, job_id)
+        if not profile_text.payload["selected_resume_baseline"]["content"]:
+            raise HTTPException(status_code=409, detail="Sync the selected approved resume baseline before generating materials.")
         package = generate_application_package(updated_job, profile_text, payload, app_prompt)
+        log_event(conn, job_id, "generation_provenance", json.dumps({
+            "baseline": getattr(profile_text, "provenance", {}), "llm": get_trace()}))
         resume_id = _insert_artifact(
             conn,
             job_id,
@@ -1537,16 +1531,21 @@ def analyze(job_id: int, generate_package: bool = True) -> dict[str, Any]:
 
 
 @app.post("/api/jobs/{job_id}/generate-package")
-def generate_package(job_id: int) -> dict[str, Any]:
+def generate_package(job_id: int, baseline: BaselineId | None = None) -> dict[str, Any]:
     with get_db() as conn:
         job = _get_job(conn, job_id)
+        job["baseline_override"] = baseline
         profile, profile_text, app_prompt = _llm_context(conn, job)
+        if not profile_text.payload["selected_resume_baseline"]["content"]:
+            raise HTTPException(status_code=409, detail="Sync the selected approved resume baseline before generating materials.")
         package = generate_application_package(
             job,
             profile_text,
             job.get("analysis_json") if isinstance(job.get("analysis_json"), dict) else None,
             app_prompt,
         )
+        log_event(conn, job_id, "generation_provenance", json.dumps({
+            "baseline": getattr(profile_text, "provenance", {}), "llm": get_trace()}))
         resume_id = _insert_artifact(
             conn,
             job_id,
@@ -1564,8 +1563,8 @@ def generate_package(job_id: int) -> dict[str, Any]:
             int(profile["version"]),
         )
         conn.execute(
-            "UPDATE jobs SET cover_letter = ?, resume_notes = ?, updated_at = ? WHERE id = ?",
-            (package.cover_letter_markdown, package.notes or "Full tailored resume generated in Artifacts.", utc_now(), job_id),
+            "UPDATE jobs SET cover_letter = ?, resume_notes = ?, resume_base = ?, updated_at = ? WHERE id = ?",
+            (package.cover_letter_markdown, package.notes or "Full tailored resume generated in Artifacts.", profile_text.provenance["id"], utc_now(), job_id),
         )
         log_event(conn, job_id, "package_generated", f"Resume artifact #{resume_id}; cover letter artifact #{cover_id}")
         return _job_details(conn, job_id)
@@ -1591,6 +1590,7 @@ def generate_supplemental(job_id: int, request: SupplementalRequest) -> dict[str
             ).fetchall()
         )
         answers = answer_supplemental_questions(job, profile_text, request.questions_text, artifacts, app_prompt)
+        log_event(conn, job_id, "llm_trace", json.dumps(get_trace()))
         artifact_id = _insert_artifact(
             conn,
             job_id,

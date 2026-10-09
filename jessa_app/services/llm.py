@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Literal, TypeVar
 
 import httpx
@@ -9,6 +10,8 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from .. import config
+from ..career_context import CareerContext, context_payload, select_baseline
+from ..llm_routing import openai_route, supplemental_tier, record_trace
 from ..defaults import DEFAULT_SYSTEM_PROMPT
 
 
@@ -116,7 +119,7 @@ def _candidate_possessive(candidate: dict[str, str]) -> str:
 
 def _task_system_prompt(system_prompt: str, task: str) -> str:
     base = (system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
-    return f"{base}\n\nTask: {task.strip()}"
+    return f"{base}\n\nMandatory source precedence: canonical facts and claim controls override historical artifacts and cached LinkedIn. Follow the selected complete baseline. Never reject solely for overqualification.\n\nTask: {task.strip()}"
 
 
 def _json_user_payload(user: dict, model_cls: type[BaseModel]) -> str:
@@ -173,7 +176,12 @@ def _generate_openai_structured(
             {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
         ],
         text_format=model_cls,
+        reasoning={"effort": provider["reasoning"]},
     )
+    usage = getattr(response, "usage", None)
+    record_trace(provider="openai", model=getattr(response, "model", provider["model"]),
+                 effort=provider["reasoning"], outcome="response",
+                 usage=usage.model_dump() if hasattr(usage, "model_dump") else None)
     for output in response.output:
         if output.type != "message":
             continue
@@ -258,25 +266,30 @@ def _generate_claude_structured(
     return model_cls.model_validate(_extract_json_object(text))
 
 
-def _generate_structured(system: str, user: dict, model_cls: type[StructuredModel]) -> StructuredModel:
+def _generate_structured(system: str, user: dict, model_cls: type[StructuredModel], *, task: str = "analysis", tier: str = "intensive") -> StructuredModel:
     providers = _configured_providers()
     if not providers:
+        record_trace(task=task, outcome="unavailable")
         raise RuntimeError("No LLM provider is configured.")
     failures: list[str] = []
-    for provider in providers:
+    implementations = {"openai": _generate_openai_structured, "grok": _generate_xai_structured,
+                       "gemini": _generate_gemini_structured, "claude": _generate_claude_structured}
+    for original in providers:
+        provider = dict(original)
+        if provider["name"] == "openai":
+            provider["model"], provider["reasoning"] = openai_route(tier)
+        started = time.monotonic()
         try:
-            if provider["name"] == "openai":
-                return _generate_openai_structured(provider, system, user, model_cls)
-            if provider["name"] == "grok":
-                return _generate_xai_structured(provider, system, user, model_cls)
-            if provider["name"] == "gemini":
-                return _generate_gemini_structured(provider, system, user, model_cls)
-            if provider["name"] == "claude":
-                return _generate_claude_structured(provider, system, user, model_cls)
-            failures.append(f"{provider['name']}: unsupported provider")
+            result = implementations[provider["name"]](provider, system, user, model_cls)
+            record_trace(task=task, tier=tier, provider=provider["name"], model=provider["model"],
+                         effort=provider.get("reasoning"), outcome="success", fallback=bool(failures),
+                         elapsed_ms=round((time.monotonic()-started)*1000))
+            return result
         except Exception as exc:
-            failures.append(f"{_provider_label(provider)} failed: {exc}")
-            continue
+            # Provider bodies can echo inputs; retain only safe error classes.
+            failures.append(f"{provider['name']}: {type(exc).__name__}")
+            record_trace(task=task, tier=tier, provider=provider["name"], model=provider["model"],
+                         effort=provider.get("reasoning"), outcome="failed", error=type(exc).__name__)
     raise RuntimeError("; ".join(failures) or "All configured LLM providers failed.")
 
 
@@ -308,7 +321,7 @@ def _fallback_score(job: dict, profile: str) -> JobAnalysis:
     if any(word in text for word in ("helpdesk", "desktop support", "tier 1", "tier i")):
         score = min(score, 42)
         band = "Overqualified"
-        recommendation = "Skip"
+        recommendation = "Maybe"
     elif score >= 78:
         band = "Just Right"
         recommendation = "Apply"
@@ -318,7 +331,7 @@ def _fallback_score(job: dict, profile: str) -> JobAnalysis:
     else:
         band = "Underqualified"
         recommendation = "Maybe"
-    resume_base = "Leadership" if re.search(r"\b(director|manager|head of|lead|principal)\b", text) else "Technical"
+    resume_base = select_baseline(str(job.get("title") or ""))
     return JobAnalysis(
         match_score=score,
         qualification_band=band,  # type: ignore[arg-type]
@@ -343,6 +356,7 @@ def _fallback_score(job: dict, profile: str) -> JobAnalysis:
 
 def analyze_job(job: dict, profile: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> JobAnalysis:
     if not _configured_providers():
+        record_trace(task="analysis", outcome="heuristic_fallback")
         return _fallback_score(job, profile)
 
     candidate = _candidate_context(profile)
@@ -356,7 +370,7 @@ def analyze_job(job: dict, profile: str, system_prompt: str = DEFAULT_SYSTEM_PRO
     )
     user = {
         "candidate_context": candidate,
-        "candidate_profile": profile[:45000],
+        "career_context": context_payload(profile),
         "job": {
             "title": job.get("title", ""),
             "company": job.get("company", ""),
@@ -378,14 +392,17 @@ def analyze_job(job: dict, profile: str, system_prompt: str = DEFAULT_SYSTEM_PRO
             "Honor any resume-source and positioning rules in the candidate profile.",
             "Estimate salary target from posted salary first; otherwise use title, seniority, remote/location, clearance, and contract/full-time hints.",
             "Use Underqualified only when required credentials/domain/hands-on experience are missing.",
-            "Use Overqualified for helpdesk, tier 1/2, desktop-only, low-comp, or low-growth roles.",
+            "Overqualification alone never warrants Skip. Match the role truthfully and enforce the canonical location and compensation rules.",
+            "Use the selected_resume_baseline identifier for resume_base.",
             f"Generate one cover letter draft in {_candidate_possessive(candidate)} voice, no generic resume padding.",
             "Generate resume tailoring notes, not a full rewritten resume.",
         ],
     }
 
     try:
-        return _generate_structured(system, user, JobAnalysis)
+        result = _generate_structured(system, user, JobAnalysis, task="analysis")
+        result.resume_base = profile.provenance["id"] if isinstance(profile, CareerContext) else select_baseline(str(job.get("title") or ""))
+        return result
     except Exception as exc:
         fallback = _fallback_score(job, profile)
         fallback.risks.insert(0, f"LLM analysis failed: {exc}")
@@ -434,7 +451,10 @@ def generate_application_package(
     analysis: dict | None = None,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> ApplicationPackage:
+    if isinstance(profile, CareerContext) and not profile.payload["selected_resume_baseline"]["content"]:
+        raise ValueError("Selected resume baseline is missing; sync the approved baseline bundle before generation.")
     if not _configured_providers():
+        record_trace(task="package", outcome="heuristic_fallback")
         return _fallback_package(job, profile)
 
     candidate = _candidate_context(profile)
@@ -448,7 +468,7 @@ def generate_application_package(
     )
     user = {
         "candidate_context": candidate,
-        "candidate_profile": profile[:55000],
+        "career_context": context_payload(profile),
         "job": {
             "title": job.get("title", ""),
             "company": job.get("company", ""),
@@ -462,15 +482,16 @@ def generate_application_package(
             "Return a full tailored resume in clean Markdown.",
             "Keep the candidate's canonical timeline and titles intact.",
             "Resume header must use candidate_context.document_name and only include contact, credential, authorization, clearance, or certification details present in the candidate profile.",
-            "Choose the resume positioning that best matches the job and the candidate profile rules.",
+            "Follow selected_resume_baseline as the complete source structure and positioning. Tailor supporting evidence without changing its canonical facts or mixing another baseline voice.",
             "No generic filler, no invented technologies, no inflated dates or titles.",
             "Return a matching cover letter in clean Markdown.",
             "Keep both documents ready for PDF rendering.",
         ],
     }
     try:
-        return _generate_structured(system, user, ApplicationPackage)
+        return _generate_structured(system, user, ApplicationPackage, task="package")
     except Exception as exc:
+        record_trace(task="package", outcome="heuristic_fallback")
         fallback = _fallback_package(job, profile)
         fallback.notes = f"LLM package generation failed: {exc}"
         return fallback
@@ -501,6 +522,7 @@ def answer_supplemental_questions(
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> SupplementalAnswers:
     if not _configured_providers():
+        record_trace(task="supplemental", outcome="heuristic_fallback")
         return _fallback_supplemental(job, questions_text)
 
     candidate = _candidate_context(profile)
@@ -514,7 +536,7 @@ def answer_supplemental_questions(
     )
     user = {
         "candidate_context": candidate,
-        "candidate_profile": profile[:45000],
+        "career_context": context_payload(profile),
         "job": {
             "title": job.get("title", ""),
             "company": job.get("company", ""),
@@ -533,7 +555,8 @@ def answer_supplemental_questions(
         ],
     }
     try:
-        return _generate_structured(system, user, SupplementalAnswers)
+        return _generate_structured(system, user, SupplementalAnswers, task="supplemental",
+                                    tier=supplemental_tier(questions_text, context_payload(profile).get("canonical_profile", "")))
     except Exception as exc:
         fallback = _fallback_supplemental(job, questions_text)
         fallback.markdown = f"LLM supplemental answer generation failed: {exc}\n\n{fallback.markdown}"

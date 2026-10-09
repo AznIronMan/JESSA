@@ -21,7 +21,11 @@ class EnvField:
 ENV_FIELDS = (
     EnvField("JESSA_LLM_PROVIDER_PRIORITY", "Provider Priority", "LLM Providers", help="Comma-separated order, for example openai,claude,gemini,grok."),
     EnvField("OPENAI_API_KEY", "OpenAI API Key", "LLM Providers", secret=True),
-    EnvField("OPENAI_MODEL", "OpenAI Model", "LLM Providers"),
+    EnvField("OPENAI_MODEL", "Legacy OpenAI Model (not used by task routes)", "LLM Providers"),
+    EnvField("OPENAI_SMALL_MODEL", "Small task model", "LLM Providers", help="Default: gpt-6-luna"),
+    EnvField("OPENAI_INTENSIVE_MODEL", "Intensive task model", "LLM Providers", help="Default: gpt-6.1-sol"),
+    EnvField("OPENAI_SMALL_REASONING", "Small task reasoning", "LLM Providers", help="Default: low"),
+    EnvField("OPENAI_INTENSIVE_REASONING", "Intensive task reasoning", "LLM Providers", help="Default: medium"),
     EnvField("CLAUDE_API_KEY", "Claude API Key", "LLM Providers", secret=True, help="ANTHROPIC_API_KEY is also accepted in .env.", aliases=("ANTHROPIC_API_KEY",)),
     EnvField("CLAUDE_MODEL", "Claude Model", "LLM Providers"),
     EnvField("GEMINI_API_KEY", "Gemini API Key", "LLM Providers", secret=True, help="GOOGLE_API_KEY is also accepted in .env.", aliases=("GOOGLE_API_KEY",)),

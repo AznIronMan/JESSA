@@ -2,7 +2,18 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.3.1`
+Current version: `3.4.0`
+
+## v3.4.0 Scope
+
+- Protect the full canonical profile, mandatory claim controls, and selected complete resume baseline in separate prompt fields.
+- Select practical, executive, or technical baselines by role; `POST /api/jobs/{id}/generate-package?baseline=practical|executive|technical` overrides automatic selection. Existing bodyless callers still work. Missing baseline content returns 409; sync the evidence bundle before generation.
+- Baselines are global reusable `resume_base` chunks with category `resume-baseline-{id}`, one complete Markdown source per chunk, source SHA-256, and `baseline-version:{version}` tag. Historical artifacts are not rewritten.
+- OpenAI task routing: `OPENAI_SMALL_MODEL=gpt-6-luna` / `OPENAI_SMALL_REASONING=low` for allowlisted documented contact facts; `OPENAI_INTENSIVE_MODEL=gpt-6.1-sol` / `OPENAI_INTENSIVE_REASONING=medium` for analysis, packages, narrative, mixed and uncertain requests. `OPENAI_MODEL` is legacy and no longer controls active task routes. Provider priority and non-OpenAI model settings are unchanged.
+- Record model, reasoning, usage, fallback and baseline provenance in job events without copying prompt text. Existing provider fallback order remains; intensive requests never downgrade to Luna.
+- Overqualification alone no longer produces a heuristic Skip. Canonical location, compensation and eligibility requirements remain authoritative.
+- Verify with `.venv/bin/python -m unittest discover -s tests -v` and `node --check jessa_app/static/app.js`.
+- Deployment: use this standalone repository, not the obsolete parent/subtree workflow. Back up the existing production code, deploy scoped files to `/srv/JESSA` on 10.0.10.117, restart `jessa.service`, verify health/version, and sync/read back the canonical bundle. Preserve server `.env` and data. Roll back by restoring the code backup and restarting the service.
 
 ## v3.3.1 Scope
 

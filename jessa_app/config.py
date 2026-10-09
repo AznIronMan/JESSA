@@ -95,7 +95,12 @@ def _normalize_client_ip(host: str | None) -> ClientIP | None:
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+# OPENAI_MODEL remains readable for legacy clients; active requests use task routes.
 OPENAI_MODEL = normalize_model(os.getenv("OPENAI_MODEL"))
+OPENAI_SMALL_MODEL = os.getenv("OPENAI_SMALL_MODEL", "gpt-6-luna").strip() or "gpt-6-luna"
+OPENAI_INTENSIVE_MODEL = os.getenv("OPENAI_INTENSIVE_MODEL", "gpt-6.1-sol").strip() or "gpt-6.1-sol"
+OPENAI_SMALL_REASONING = os.getenv("OPENAI_SMALL_REASONING", "low").strip() or "low"
+OPENAI_INTENSIVE_REASONING = os.getenv("OPENAI_INTENSIVE_REASONING", "medium").strip() or "medium"
 GEMINI_API_KEY = _env_first("GEMINI_API_KEY", "GOOGLE_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
 GEMINI_BASE_URL = (
@@ -207,7 +212,7 @@ def postgres_configured() -> bool:
 
 def llm_provider_configs() -> dict[str, dict[str, str]]:
     return {
-        "openai": {"api_key": OPENAI_API_KEY, "model": OPENAI_MODEL, "base_url": ""},
+        "openai": {"api_key": OPENAI_API_KEY, "model": OPENAI_INTENSIVE_MODEL, "base_url": ""},
         "gemini": {"api_key": GEMINI_API_KEY, "model": GEMINI_MODEL, "base_url": GEMINI_BASE_URL},
         "grok": {"api_key": GROK_API_KEY, "model": GROK_MODEL, "base_url": GROK_BASE_URL},
         "claude": {"api_key": CLAUDE_API_KEY, "model": CLAUDE_MODEL, "base_url": CLAUDE_BASE_URL},

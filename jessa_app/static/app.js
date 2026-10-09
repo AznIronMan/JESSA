@@ -409,6 +409,7 @@ function renderJobDetail(job) {
     : `
         ${urlButton}
         <button id="analyze-job" class="primary">Analyze</button>
+        <label>Resume baseline <select id="resume-baseline"><option value="">Automatic</option value="practical">Practical IT leadership</option><option value="executive">Executive leadership</option><option value="technical">Hands-on technical</option></select></label>
         <button id="generate-package">Regenerate Docs</button>
         <button id="save-job">Save</button>
       `;
@@ -743,7 +744,9 @@ async function analyzeSelectedJob() {
 async function generatePackage() {
   if (!state.selectedJobId) return;
   toast("Regenerating resume and cover letter...");
-  const job = await api(`/api/jobs/${state.selectedJobId}/generate-package`, { method: "POST" });
+  const baseline = $("#resume-baseline")?.value || "";
+  const query = baseline ? `?baseline=${encodeURIComponent(baseline)}` : "";
+  const job = await api(`/api/jobs/${state.selectedJobId}/generate-package${query}`, { method: "POST" });
   await loadJobs();
   renderJobDetail(job);
   toast("Application materials regenerated.");
