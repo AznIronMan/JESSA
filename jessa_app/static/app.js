@@ -12,6 +12,72 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 
+async function higherEdCapture(selector) {
+  const file = $(selector).files[0];
+  if (!file) return "";
+  if (file.size > 2000000) throw new Error("Saved page exceeds the 2 MB limit.");
+  return file.text();
+}
+
+async function findHigherEdJobs() {
+  const button = $("#hej-search");
+  button.disabled = true;
+  $("#hej-status").textContent = "Searching HigherEdJobs…";
+  $("#hej-results").replaceChildren();
+  try {
+    const result = await api("/api/sources/higheredjobs/search", {
+      method: "POST",
+      body: JSON.stringify({url: $("#hej-search-url").value, limit: Number($("#hej-limit").value),
+        max_pages: Number($("#hej-pages").value), html: await higherEdCapture("#hej-search-html"),
+        observed_on: $("#hej-observed-on").value}),
+    });
+    $("#hej-status").textContent = `${result.jobs.length} opportunities · ${result.pages.length} page(s). ${result.warnings.join(" ")}`;
+    for (const job of result.jobs) {
+      const card = document.createElement("article");
+      card.className = "hej-result";
+      card.innerHTML = `<h3><a href="${escapeHtml(job.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(job.title)}</a></h3>
+        <p>${escapeHtml([job.company, job.location, job.posted_date].filter(Boolean).join(" · "))}</p>
+        <p>${escapeHtml(job.summary)}</p>`;
+      const action = document.createElement("button");
+      action.textContent = job.existing_job_id ? `Open existing job (${job.existing_status})` : "Import into JESSA";
+      action.addEventListener("click", async () => {
+        action.disabled = true;
+        try {
+          $("#hej-posting-url").value = job.url;
+          if (job.existing_job_id) {
+            showTab("jobs");
+            await loadJobs();
+            await selectJob(job.existing_job_id);
+          } else {
+            await importHigherEdPosting(job.url);
+            action.textContent = "Imported";
+          }
+        } catch (error) {
+          $("#hej-status").textContent = error.message;
+          toast(error.message);
+          action.disabled = false;
+        }
+      });
+      card.append(action);
+      $("#hej-results").append(card);
+    }
+  } catch (error) {
+    $("#hej-status").textContent = error.message;
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function importHigherEdPosting(url, html = "") {
+  const job = await api("/api/jobs/import", {method: "POST", body: JSON.stringify({url, html,
+    observed_on: $("#hej-observed-on").value})});
+  showTab("jobs");
+  await loadJobs();
+  await selectJob(job.id);
+  toast("HigherEdJobs posting imported. Review fit before preparing an application.");
+}
+
 const JOB_STATUSES = [
   ["new", "New"],
   ["not_applied", "Not Applied"],
@@ -1080,6 +1146,19 @@ function setupActions() {
   $("#toggle-text-import").addEventListener("click", () => $("#text-import").classList.toggle("hidden"));
   $("#import-url").addEventListener("click", () => importJob(false).catch((error) => toast(error.message)));
   $("#import-text").addEventListener("click", () => importJob(true).catch((error) => toast(error.message)));
+  $("#hej-search").addEventListener("click", findHigherEdJobs);
+  $("#hej-import-capture").addEventListener("click", async () => {
+    const button = $("#hej-import-capture");
+    button.disabled = true;
+    try {
+      await importHigherEdPosting($("#hej-posting-url").value, await higherEdCapture("#hej-posting-html"));
+    } catch (error) {
+      $("#hej-status").textContent = error.message;
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
   $("#save-profile").addEventListener("click", () => saveProfile().catch((error) => toast(error.message)));
   $("#import-profile").addEventListener("click", () => importProfile().catch((error) => {
     $("#profile-import-status").textContent = "import failed";

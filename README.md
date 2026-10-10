@@ -2,7 +2,23 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.5.0`
+Current version: `3.6.0`
+
+## v3.6.0 Scope
+
+- HigherEdJobs tab: preview public search results or RSS, identify jobs already tracked, and import selected postings into the normal fit/materials workflow. Discovery itself writes no jobs and calls no LLM.
+- Dedicated HigherEdJobs parser reads job-header, institution/location, jobAttrib salary/type/posted date/deadline/categories, jobDesc, and the public data-orig-href employer apply URL. It does not request the robots-disallowed click-through path.
+- Canonical JobCode identity deduplicates Title/tracking URL variants and recognizes legacy jobs without resetting their status. Conflicting legacy duplicates require review.
+- Crawl limits: 1-3 pages, 1-50 results, 2 MB/page, same-host HTTPS URLs, robots.txt checks, no login/session extraction, no challenge solving, no automatic retries after 403/429. A blocked page cannot become a job.
+- Saved public HTML is a first-class alternative when HigherEdJobs requires a human security check. Chrome's **Save Page As → Webpage, HTML Only** preserves posting fields without exporting browser credentials. Capture date is optional for fresh pages and should be supplied for older captures with relative dates.
+- Additive APIs: `POST /api/sources/higheredjobs/search` with `{url, html?, limit, max_pages, observed_on?}`; `POST /api/sources/higheredjobs/posting` with `{url, html?, observed_on?}` for a read-only preview; existing `POST /api/jobs/import` accepts saved HigherEdJobs `html` and `observed_on`. No database migration or application-submission behavior changes.
+- Verify with `.venv/bin/python -m unittest discover -s tests -v` and `node --check jessa_app/static/app.js`. Deploy scoped code/static/template files to `/srv/JESSA`, preserve `.env` and data, and retain a code backup for rollback.
+
+### HigherEdJobs workflow
+
+Open the HigherEdJobs tab. The default search is **IT Manager/Director**, newest first; replace the URL with another public HigherEdJobs results or RSS URL for a different category, keyword, or location. Click **Find jobs**. Select a posting to import, or open an existing job if the JobCode is already tracked.
+
+If public HTTP requests are blocked, complete the security check in your own Chrome tab and save that public search page as HTML Only. Select it under **Saved search page or RSS**, supply the capture date when needed, and click **Find jobs**. Save a selected job's detail page the same way and use **Import a saved posting**. The server does not reuse or export your browser session. Imports create intake records; assess fit, prepare materials, and review the employer portal separately.
 
 ## v3.5.0 Scope
 
@@ -472,6 +488,9 @@ This project uses semantic versioning.
 - `3.2.6`: Headless LinkedIn persistent browser defaults for display-less production servers.
 - `3.3.0`: Scoped career evidence, canonical precedence, exact artifact import, and evidence-aware generation.
 - `3.3.1`: Exact-job confidential evidence prioritization for long reference artifacts.
+- `3.4.0`: Complete resume baselines, protected career context, and task-based LLM routing.
+- `3.5.0`: Pipeline statuses, deterministic winnability, and funnel/follow-up reports.
+- `3.6.0`: HigherEdJobs discovery, posting extraction, canonical JobCode deduplication, and saved-public-HTML intake.
 
 ## Roadmap
 

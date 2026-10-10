@@ -43,6 +43,9 @@ class LinkedInProfileSnapshot:
 
 
 def source_from_url(url: str) -> str:
+    from .higheredjobs import is_higheredjobs_url
+    if is_higheredjobs_url(url):
+        return "higheredjobs"
     host = urlparse(url).netloc.lower()
     for marker in (
         "indeed",
@@ -1146,6 +1149,10 @@ def parse_heyhealthtech_html(url: str, html: str) -> ImportedJob:
 
 
 def parse_html(url: str, html: str) -> ImportedJob:
+    from .higheredjobs import is_higheredjobs_url, parse_posting
+    if is_higheredjobs_url(url):
+        parsed = parse_posting(url, html)
+        return ImportedJob(**{key: value for key, value in parsed.items() if key != "details"})
     if is_heyhealthtech_url(url):
         return parse_heyhealthtech_html(url, html)
     if is_partnersindiversity_url(url):
@@ -1176,7 +1183,13 @@ def parse_html(url: str, html: str) -> ImportedJob:
 
 
 async def import_from_url(url: str, method: str = "http") -> ImportedJob:
+    from .higheredjobs import is_higheredjobs_url, canonical_job_url, fetch_public
     method = (method or "http").lower()
+    if is_higheredjobs_url(url):
+        # HigherEdJobs owns an explicit public-fetch and challenge-detection
+        # path. Rendered mode must not turn a security page into a job.
+        url = canonical_job_url(url)
+        return parse_html(url, await fetch_public(url))
     if is_linkedin_url(url) and method in {"http", "playwright", "linkedin", "auto"}:
         html = await fetch_url_with_persistent_browser(url)
         return parse_linkedin_html(url, html)

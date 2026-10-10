@@ -16,6 +16,7 @@
         <nav class="tabs" aria-label="Views">
           <button class="tab hidden" data-tab="setup" id="setup-tab">Setup</button>
           <button class="tab active" data-tab="jobs">Jobs</button>
+          <button class="tab" data-tab="higheredjobs">HigherEdJobs</button>
           <button class="tab" data-tab="profile">Core Profile</button>
           <button class="tab" data-tab="email">Email</button>
           <button class="tab" data-tab="reports">Reports</button>
@@ -82,6 +83,32 @@
         <section class="job-detail" id="job-detail">
           <div class="empty-state">Select or import a job.</div>
         </section>
+      </section>
+    </main>
+
+    <main class="view" id="higheredjobs-view">
+      <section class="editor-shell hej-shell">
+        <h1>HigherEdJobs</h1>
+        <p>Find higher-education opportunities, then import selected postings for fit analysis and application materials.</p>
+        <label>Search or RSS URL
+          <input id="hej-search-url" type="url" value="https://www.higheredjobs.com/admin/search.cfm?JobCat=163&amp;SortBy=1" />
+        </label>
+        <div class="hej-controls">
+          <label>Results <input id="hej-limit" type="number" min="1" max="50" value="20" /></label>
+          <label>Pages <input id="hej-pages" type="number" min="1" max="3" value="1" /></label>
+          <label>Capture date <input id="hej-observed-on" type="date" /></label>
+          <button id="hej-search">Find jobs</button>
+        </div>
+        <p>If HigherEdJobs asks for a security check, open it in Chrome, complete the check, and save <strong>Webpage, HTML Only</strong>. Choose that public page below and click Find jobs again.</p>
+        <label>Saved search page or RSS <input id="hej-search-html" type="file" accept=".html,.htm,.xml" /></label>
+        <p id="hej-status" role="status" aria-live="polite"></p>
+        <div id="hej-results"></div>
+        <hr />
+        <h2>Import a saved posting</h2>
+        <label>Posting URL <input id="hej-posting-url" type="url" placeholder="https://www.higheredjobs.com/admin/details.cfm?JobCode=..." /></label>
+        <label>Saved posting HTML <input id="hej-posting-html" type="file" accept=".html,.htm" /></label>
+        <button id="hej-import-capture">Import posting</button>
+        <p>Discovery creates no applications. Imported postings enter the ordinary Jobs workflow; application submission is a separate step.</p>
       </section>
     </main>
 

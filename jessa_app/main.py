@@ -13,7 +13,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from . import __version__, config, db as db_module
@@ -46,6 +46,10 @@ from .evidence import (
 )
 from .services.email_client import classify, match_job, sync_inbox, test_smtp
 from .services.importer import ImportedJob, fetch_linkedin_profile, import_from_text, import_from_url
+from .services.higheredjobs import (
+    DEFAULT_SEARCH_URL, HigherEdJobsError, canonical_job_url, discover,
+    fetch_public, parse_posting,
+)
 from .career_context import assemble_context, BaselineId
 from .llm_routing import reset_trace, get_trace
 from .services.llm import analyze_job, answer_supplemental_questions, generate_application_package
@@ -124,6 +128,22 @@ class ImportRequest(BaseModel):
     url: str = ""
     text: str = ""
     method: str = "http"
+    html: str = Field(default="", max_length=2_000_000)
+    observed_on: str = ""
+
+
+class HigherEdJobsSearchRequest(BaseModel):
+    url: str = DEFAULT_SEARCH_URL
+    html: str = Field(default="", max_length=2_000_000)
+    limit: int = Field(default=20, ge=1, le=50)
+    max_pages: int = Field(default=1, ge=1, le=3)
+    observed_on: str = ""
+
+
+class HigherEdJobsPostingRequest(BaseModel):
+    url: str
+    html: str = Field(default="", max_length=2_000_000)
+    observed_on: str = ""
 
 
 class ProfileUpdate(BaseModel):
@@ -729,10 +749,30 @@ def _insert_artifact(
     return int(row["id"])
 
 
+def _higheredjobs_existing(conn) -> dict[str, dict]:
+    rows = conn.execute("SELECT id, url, status, title FROM jobs WHERE url LIKE ?", ("%higheredjobs.com/%",)).fetchall()
+    by_url = {}
+    for row in rows:
+        try:
+            url = canonical_job_url(row["url"])
+        except (HigherEdJobsError, ValueError):
+            continue
+        if url in by_url and int(by_url[url]["id"]) != int(row["id"]):
+            by_url[url]["duplicate_ids"] = [by_url[url]["id"], row["id"]]
+        else:
+            by_url[url] = dict(row)
+    return by_url
+
+
 def _insert_or_update_job(conn, imported: ImportedJob) -> int:
     now = utc_now()
     existing = None
-    if imported.url:
+    if imported.source == "higheredjobs":
+        imported.url = canonical_job_url(imported.url)
+        existing = _higheredjobs_existing(conn).get(imported.url)
+        if existing and existing.get("duplicate_ids"):
+            raise HTTPException(status_code=409, detail="Multiple existing JESSA jobs share this HigherEdJobs JobCode. Review them before importing.")
+    if imported.url and not existing:
         existing = conn.execute("SELECT id FROM jobs WHERE url = ?", (imported.url,)).fetchone()
     values = (
         imported.source,
@@ -1247,12 +1287,18 @@ def list_jobs(view: str = JOB_LIFECYCLE_ACTIVE, status: str = "") -> list[dict[s
 
 @app.post("/api/jobs/import")
 async def import_job(request: ImportRequest) -> dict[str, Any]:
-    if request.url.strip():
+    if request.html:
+        try:
+            parsed = parse_posting(request.url, request.html, observed_on=_capture_date(request.observed_on))
+            imported = ImportedJob(**{key: value for key, value in parsed.items() if key != "details"})
+        except HigherEdJobsError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    elif request.url.strip():
         try:
             imported = await import_from_url(request.url.strip(), request.method)
         except Exception as exc:
             if not request.text.strip():
-                raise HTTPException(status_code=422, detail=f"URL import failed: {exc}") from exc
+                raise HTTPException(status_code=getattr(exc, "status_code", 422), detail=f"URL import failed: {exc}") from exc
             imported = import_from_text(request.text)
             imported.url = request.url.strip()
             imported.apply_url = request.url.strip()
@@ -1265,6 +1311,53 @@ async def import_job(request: ImportRequest) -> dict[str, Any]:
     with get_db() as conn:
         job_id = _insert_or_update_job(conn, imported)
         return _get_job(conn, job_id)
+
+
+def _capture_date(value: str):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="observed_on must be YYYY-MM-DD.") from exc
+
+
+@app.post("/api/sources/higheredjobs/search")
+async def search_higheredjobs(request: HigherEdJobsSearchRequest) -> dict[str, Any]:
+    observed_on = _capture_date(request.observed_on)
+    try:
+        result = await discover(request.url, html=request.html, limit=request.limit,
+                                max_pages=request.max_pages, observed_on=observed_on)
+    except HigherEdJobsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="HigherEdJobs could not be reached. Use a saved public results page.") from exc
+    with get_db() as conn:
+        existing = _higheredjobs_existing(conn)
+    for job in result["jobs"]:
+        match = existing.get(job["url"])
+        job["existing_job_id"] = int(match["id"]) if match else None
+        job["existing_status"] = match["status"] if match else ""
+    return result
+
+
+@app.post("/api/sources/higheredjobs/posting")
+async def preview_higheredjobs(request: HigherEdJobsPostingRequest) -> dict[str, Any]:
+    observed_on = _capture_date(request.observed_on)
+    try:
+        url = canonical_job_url(request.url)
+        html = request.html or await fetch_public(url)
+        parsed = parse_posting(url, html, observed_on=observed_on)
+    except HigherEdJobsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="HigherEdJobs could not be reached. Use a saved public posting page.") from exc
+    with get_db() as conn:
+        match = _higheredjobs_existing(conn).get(url)
+    parsed["existing_job_id"] = int(match["id"]) if match else None
+    parsed["existing_status"] = match["status"] if match else ""
+    parsed["capture_sha256"] = hashlib.sha256(html.encode()).hexdigest()
+    return parsed
 
 
 @app.post("/api/jobs/bulk/trash")
