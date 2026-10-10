@@ -52,6 +52,13 @@ class WinnabilityScoreTests(unittest.TestCase):
         self.assertEqual(result["score"], 0)
         self.assertEqual(result["employer_type"], "aggregator")
 
+    def test_local_match_is_whole_word(self):
+        with patch.dict(os.environ, {"JESSA_LOCAL_LOCATIONS": "Portland, OR,Salem"}):
+            corp = w.score_job({"company": "Acme Corp", "location": "Orlando, FL"}, NOW)
+            local = w.score_job({"company": "Acme", "location": "Salem, OR"}, NOW)
+        self.assertNotIn("local / commutable", [f["factor"] for f in corp["factors"]])
+        self.assertIn("local / commutable", [f["factor"] for f in local["factors"]])
+
     def test_unknown_signals_are_neutral(self):
         result = w.score_job({"company": "Acme", "location": "Denver, CO"}, NOW)
         self.assertEqual(result["score"], 50)

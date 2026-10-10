@@ -32,8 +32,9 @@ def _local_pattern() -> re.Pattern[str] | None:
     raw = os.getenv("JESSA_LOCAL_LOCATIONS", "").strip()
     if not raw:
         return None
-    parts = [re.escape(p.strip()) for p in raw.split(",") if p.strip()]
-    return re.compile("|".join(parts), re.I) if parts else None
+    # Whole place names only, at least three characters, so "WA" or "OR" fragments never match inside words.
+    parts = [re.escape(p.strip()) for p in raw.split(",") if len(p.strip()) >= 3]
+    return re.compile(r"\b(?:" + "|".join(parts) + r")\b", re.I) if parts else None
 
 
 def parse_posting_age_days(posted: str, now: datetime | None = None) -> int | None:
