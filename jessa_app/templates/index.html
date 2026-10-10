@@ -18,6 +18,7 @@
           <button class="tab active" data-tab="jobs">Jobs</button>
           <button class="tab" data-tab="profile">Core Profile</button>
           <button class="tab" data-tab="email">Email</button>
+          <button class="tab" data-tab="reports">Reports</button>
         </nav>
         <button class="icon-button" id="open-settings" title="Settings" aria-label="Settings">&#9881;</button>
       </div>
@@ -166,6 +167,18 @@
         <span id="email-status"></span>
       </section>
       <section class="email-list" id="email-list"></section>
+    </main>
+
+    <main class="view" id="reports-view">
+      <section class="email-actions report-actions">
+        <button id="refresh-reports">Refresh</button>
+        <label class="status-filter">Since <input id="report-since" type="date"></label>
+        <span id="report-status"></span>
+      </section>
+      <section class="report-body">
+        <div id="report-follow-ups"></div>
+        <div id="report-funnel"></div>
+      </section>
     </main>
 
     <div class="toast hidden" id="toast"></div>

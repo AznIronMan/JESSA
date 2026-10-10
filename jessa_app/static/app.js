@@ -21,6 +21,9 @@ const JOB_STATUSES = [
   ["follow-up", "Follow-up"],
   ["interview", "Interview"],
   ["on_hold", "On Hold"],
+  ["blocked", "Blocked"],
+  ["ghosted", "Ghosted"],
+  ["no_response", "No Response"],
   ["job_expired", "Job Expired"],
   ["not_for_me", "Not For Me"],
   ["rejected", "Rejected"],
@@ -312,6 +315,7 @@ function renderJobs() {
             <div class="job-badges">
               <span class="badge ${badgeClass(job.recommendation)}">${escapeHtml(job.recommendation || job.status || "new")}</span>
               <span class="badge">${score}</span>
+              ${job.winnability_band ? `<span class="badge ${badgeClass(job.winnability_band)}" title="Winnability">win ${escapeHtml(String(job.winnability_score ?? ""))}</span>` : ""}
               <span class="badge ${badgeClass(job.qualification_band)}">${escapeHtml(job.qualification_band || "unscored")}</span>
               <span class="badge">${escapeHtml(job.resume_base || "resume")}</span>
               ${lifecycleBadge}
@@ -444,7 +448,7 @@ function renderJobDetail(job) {
     <div class="analysis-grid">
       <div class="metric"><span>Match</span><strong>${job.match_score ?? "--"}${job.match_score === null || job.match_score === undefined ? "" : "%"}</strong></div>
       <div class="metric"><span>Fit</span><strong>${escapeHtml(job.qualification_band || "--")}</strong></div>
-      <div class="metric"><span>Interview</span><strong>${escapeHtml(job.interview_odds || "--")}</strong></div>
+      <div class="metric" title="Posting signals: age, applicants, employer type, location. Not an LLM estimate."><span>Winnability</span><strong>${job.winnability_score ?? "--"}${job.winnability_band ? ` ${escapeHtml(job.winnability_band)}` : ""}</strong></div>
       <div class="metric"><span>Resume</span><strong>${escapeHtml(job.resume_base || "--")}</strong></div>
     </div>
 
@@ -491,6 +495,8 @@ function renderJobDetail(job) {
       ${analysisList(job, "risks")}
       <h2>Keyword Gaps</h2>
       ${analysisList(job, "keyword_gaps")}
+      <h2>Winnability Factors</h2>
+      ${winnabilityList(job)}
     </section>
 
     <section class="section">
@@ -931,6 +937,61 @@ async function fetchLinkedInProfileCache() {
   toast("LinkedIn profile cached.");
 }
 
+function winnabilityList(job) {
+  let data = null;
+  try { data = JSON.parse(job.winnability_json || "null"); } catch (error) { data = null; }
+  if (!data || !Array.isArray(data.factors) || !data.factors.length) return `<p class="job-metadata">Not scored yet.</p>`;
+  return `<ul>${data.factors.map((item) => {
+    const sign = item.points > 0 ? "+" : "";
+    return `<li>${escapeHtml(item.factor)} <span class="job-metadata">${item.points ? sign + item.points : "0"}</span></li>`;
+  }).join("")}</ul>`;
+}
+
+function funnelTable(title, rows) {
+  if (!rows || !rows.length) return "";
+  return `
+    <h2>${escapeHtml(title)}</h2>
+    <table class="report-table">
+      <thead><tr><th>Group</th><th>Applied</th><th>Progressed</th><th>%</th><th>Rejected</th><th>Ghosted</th><th>No response</th><th>Awaiting</th></tr></thead>
+      <tbody>${rows.map((row) => `
+        <tr><td>${escapeHtml(row.key)}</td><td>${row.applied}</td><td>${row.progressed}</td><td>${row.progressed_pct}</td>
+        <td>${row.rejected}</td><td>${row.ghosted}</td><td>${row.no_response}</td><td>${row.awaiting}</td></tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+
+async function loadReports() {
+  const since = $("#report-since").value;
+  const [funnel, due] = await Promise.all([
+    api(`/api/reports/funnel${since ? `?since=${encodeURIComponent(since)}` : ""}`),
+    api("/api/reports/follow-up-due"),
+  ]);
+  const dueRows = due.items.filter((item) => !item.action.startsWith("No response"));
+  const agingCount = due.items.length - dueRows.length;
+  $("#report-follow-ups").innerHTML = `
+    <h2>Follow-ups due (${dueRows.length})</h2>
+    ${dueRows.length ? `<table class="report-table report-table-left"><thead><tr><th>Job</th><th>Status</th><th>Days</th><th>Action</th></tr></thead><tbody>
+      ${dueRows.map((item) => `<tr><td><button class="link-button" data-report-job="${item.id}">#${item.id} ${escapeHtml([item.company, item.title].filter(Boolean).join(" · "))}</button></td>
+        <td>${escapeHtml(item.status)}</td><td>${item.days_since_status ?? "--"}</td><td>${escapeHtml(item.action)}</td></tr>`).join("")}
+      </tbody></table>` : `<p class="job-metadata">Nothing due.</p>`}
+    ${agingCount ? `<p class="job-metadata">${agingCount} applied job(s) have had no response for 45+ days and can be set to No Response.</p>` : ""}`;
+  const totals = funnel.totals || {};
+  $("#report-funnel").innerHTML = `
+    <p><strong>${totals.applied || 0}</strong> applied · <strong>${totals.progressed || 0}</strong> progressed (${totals.progressed_pct || 0}%) · ${totals.rejected || 0} rejected · ${totals.ghosted || 0} ghosted · ${totals.no_response || 0} no response · ${totals.awaiting || 0} awaiting</p>
+    <p class="job-metadata">${escapeHtml(funnel.definition || "")}</p>
+    ${funnelTable("By source", funnel.by_source)}
+    ${funnelTable("By employer type", funnel.by_employer_type)}
+    ${funnelTable("By winnability", funnel.by_winnability_band)}
+    ${funnelTable("By match score", funnel.by_match_band)}
+    ${funnelTable("By month", funnel.by_month)}`;
+  document.querySelectorAll("[data-report-job]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      showTab("jobs");
+      await selectJob(Number(button.dataset.reportJob));
+    });
+  });
+}
+
 async function loadEmails() {
   const emails = await api("/api/emails");
   renderEmails(emails);
@@ -984,6 +1045,7 @@ function setupTabs() {
         await loadEvidenceCoverage();
       }
       if (tab.dataset.tab === "email") await loadEmails();
+      if (tab.dataset.tab === "reports") await loadReports();
     });
   });
 }
@@ -1041,6 +1103,8 @@ function setupActions() {
     $("#settings-save-status").textContent = "save failed";
     toast(error.message);
   }));
+  $("#refresh-reports").addEventListener("click", () => loadReports().catch((error) => toast(error.message)));
+  $("#report-since").addEventListener("change", () => loadReports().catch((error) => toast(error.message)));
   $("#sync-email").addEventListener("click", () => syncEmail().catch((error) => {
     $("#email-status").textContent = "Sync failed";
     toast(error.message);

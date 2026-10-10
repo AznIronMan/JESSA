@@ -2,7 +2,18 @@
 
 JESSA stands for **Job Engineering Smart Search Assistant**. It is a portable job-search workstation that imports job URLs or pasted job text, stores applications in PostgreSQL, scores role fit against an editable candidate core profile, generates application materials with the configured LLM provider, and classifies Google Workspace email updates through IMAP.
 
-Current version: `3.4.0`
+Current version: `3.5.0`
+
+## v3.5.0 Scope
+
+- New statuses `blocked`, `ghosted`, and `no_response`. `ghosted` and `no_response` archive on change but stay reopenable: an interview or assessment email (and, for `no_response`, a rejection) moves the job back to active with the new status. A late application-confirmation email never reverts them to `applied`.
+- Winnability: a deterministic 0-100 score and High/Medium/Low band stored on every job (`winnability_score`, `winnability_band`, `winnability_json`). It uses posting signals only: posting age, applicant count, repost, one-click Easy Apply, employer type (direct, public sector, higher ed, staffing agency, aggregator, crowd work), and remote versus local. It is computed on import, update, analysis, and `POST /api/winnability/recompute`. No LLM call and no candidate text.
+- Analysis combines fit and winnability: an LLM `Apply` becomes `Maybe` (with the reason added to risks) when winnability is Low or the posting comes through an aggregator or crowd-work platform. The original LLM value is kept as `llm_recommendation` in `analysis_json`.
+- The UI shows Winnability in place of the uncalibrated LLM interview-odds metric (the field is still stored) and lists the winnability factors on each job.
+- LinkedIn imports now keep the applicant count and the Easy Apply flag from the top card (`Applicants:` and `Apply method:` lines in the description).
+- Reports tab and APIs: `GET /api/reports/funnel?since=YYYY-MM-DD` (applied, progressed, rejected, ghosted, no response, awaiting by source, employer type, winnability band, match band, and month) and `GET /api/reports/follow-up-due` (interview status checks, follow-ups, and applications ready to age to `no_response`).
+- Optional settings: `JESSA_LOCAL_LOCATIONS` (comma-separated place names that count as commutable), `JESSA_AGGREGATOR_PATTERNS`, `JESSA_CROWD_WORK_PATTERNS`, `JESSA_AGENCY_PATTERNS` (regular expressions overriding the built-in lists).
+- Verify with `.venv/bin/python -m unittest discover -s tests -v` and `node --check jessa_app/static/app.js`. Deploy as in v3.4.0, then run `POST /api/winnability/recompute` once to backfill existing jobs.
 
 ## v3.4.0 Scope
 

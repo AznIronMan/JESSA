@@ -880,3 +880,48 @@ textarea {
     display: grid;
   }
 }
+
+/* v3.5.0 reports */
+.report-actions {
+  grid-template-columns: 120px 220px 1fr;
+}
+
+.report-body {
+  height: calc(100vh - 113px);
+  overflow: auto;
+  padding: 12px 18px;
+}
+
+.report-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 6px 0 18px;
+  font-size: 13px;
+}
+
+.report-table th,
+.report-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.report-table td:not(:first-child),
+.report-table th:not(:first-child) {
+  text-align: right;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  text-align: left;
+}
+
+.report-table-left td,
+.report-table-left th {
+  text-align: left !important;
+}

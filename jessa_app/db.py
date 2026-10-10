@@ -32,6 +32,8 @@ VALID_JOB_LIFECYCLE_STATES = {
     JOB_LIFECYCLE_TRASH,
 }
 AUTO_ARCHIVE_STATUSES = frozenset({"not_for_me", "job_expired", "rejected"})
+# Archived on status change, but a later employer email can still reopen them (v3.5.0).
+QUIET_ARCHIVE_STATUSES = frozenset({"ghosted", "no_response"})
 TRASH_RETENTION_HOURS = 24
 
 
@@ -439,6 +441,9 @@ def init_db() -> None:
         _ensure_column(conn, "jobs", "trashed_at", "TEXT")
         _ensure_column(conn, "jobs", "purge_after", "TEXT")
         _ensure_column(conn, "jobs", "previous_lifecycle_state", "TEXT")
+        _ensure_column(conn, "jobs", "winnability_score", "INTEGER")
+        _ensure_column(conn, "jobs", "winnability_band", "TEXT")
+        _ensure_column(conn, "jobs", "winnability_json", "TEXT")
         _ensure_column(conn, "core_profile", "source_path", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "core_profile", "source_sha256", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "core_profile", "synced_at", "TEXT")

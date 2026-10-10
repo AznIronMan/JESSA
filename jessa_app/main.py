@@ -19,6 +19,7 @@ from starlette.requests import Request
 from . import __version__, config, db as db_module
 from .db import (
     AUTO_ARCHIVE_STATUSES,
+    QUIET_ARCHIVE_STATUSES,
     DatabaseConfigError,
     JOB_LIFECYCLE_ACTIVE,
     JOB_LIFECYCLE_ARCHIVED,
@@ -49,6 +50,7 @@ from .career_context import assemble_context, BaselineId
 from .llm_routing import reset_trace, get_trace
 from .services.llm import analyze_job, answer_supplemental_questions, generate_application_package
 from .services.pdf import markdown_to_pdf
+from .winnability import combine_recommendation, score_job
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -225,10 +227,18 @@ JOB_STATUS_VALUES = {
     "follow-up",
     "interview",
     "on_hold",
+    "blocked",
+    "ghosted",
+    "no_response",
     "job_expired",
     "not_for_me",
     "rejected",
 }
+
+# Statuses that mean an application was submitted, and the subset that shows real progress.
+APPLIED_FAMILY_STATUSES = {"applied", "follow-up", "interview", "rejected", "ghosted", "no_response"}
+PROGRESSED_STATUSES = {"follow-up", "interview", "ghosted"}
+PROGRESS_EMAIL_EVENTS = ("email:interview_request", "email:assessment_request")
 
 EMAIL_STATUS_CLASSIFICATIONS = {
     "application_confirmation": "applied",
@@ -243,8 +253,13 @@ EMAIL_STATUS_RANK = {
     "tailor": 1,
     "ready": 2,
     "on_hold": 2,
+    "blocked": 2,
     "applied": 3,
+    # A late confirmation (applied) never reopens no_response; an assessment or interview does.
+    "no_response": 3,
     "follow-up": 4,
+    # Only a new interview request reopens a ghosted job.
+    "ghosted": 4,
     "interview": 5,
     "not_for_me": 99,
     "job_expired": 99,
@@ -291,7 +306,8 @@ def _parse_utc(value: str | None) -> datetime | None:
 
 
 def _auto_archive_status(status: str | None) -> bool:
-    return str(status or "").strip() in AUTO_ARCHIVE_STATUSES
+    value = str(status or "").strip()
+    return value in AUTO_ARCHIVE_STATUSES or value in QUIET_ARCHIVE_STATUSES
 
 
 def _email_suggested_status(message: Any) -> str:
@@ -413,6 +429,17 @@ def _apply_email_status(conn, message: Any) -> str:
             (suggested_status, now, now, JOB_LIFECYCLE_ARCHIVED, now, int(job_id)),
         )
         log_event(conn, int(job_id), "archived", "Auto archived after email terminal status.")
+    elif current_status in QUIET_ARCHIVE_STATUSES:
+        conn.execute(
+            """
+            UPDATE jobs
+            SET status = ?, status_updated_at = ?, updated_at = ?,
+                lifecycle_state = ?, archived_at = NULL, previous_lifecycle_state = NULL
+            WHERE id = ?
+            """,
+            (suggested_status, now, now, JOB_LIFECYCLE_ACTIVE, int(job_id)),
+        )
+        log_event(conn, int(job_id), "restored", f"Reopened from {current_status} after a new employer email.")
     else:
         conn.execute(
             "UPDATE jobs SET status = ?, status_updated_at = ?, updated_at = ? WHERE id = ?",
@@ -745,6 +772,7 @@ def _insert_or_update_job(conn, imported: ImportedJob) -> int:
             ),
         )
         log_event(conn, job_id, "updated", imported.extraction_note)
+        _refresh_winnability(conn, job_id)
         return job_id
     cur = conn.execute(
         """
@@ -760,7 +788,23 @@ def _insert_or_update_job(conn, imported: ImportedJob) -> int:
     row = cur.fetchone()
     job_id = int(row["id"])
     log_event(conn, job_id, "imported", imported.extraction_note)
+    _refresh_winnability(conn, job_id)
     return job_id
+
+
+def _refresh_winnability(conn, job_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT id, source, title, company, location, posted_date, description FROM jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return {}
+    result = score_job(row_to_dict(row))
+    conn.execute(
+        "UPDATE jobs SET winnability_score = ?, winnability_band = ?, winnability_json = ? WHERE id = ?",
+        (result["score"], result["band"], json.dumps(result), job_id),
+    )
+    return result
 
 
 @app.on_event("startup")
@@ -1188,7 +1232,8 @@ def list_jobs(view: str = JOB_LIFECYCLE_ACTIVE, status: str = "") -> list[dict[s
             SELECT id, source, title, company, location, salary, status, match_score,
                    qualification_band, interview_odds, salary_ask_range, resume_base,
                    recommendation, lifecycle_state, archived_at, trashed_at, purge_after,
-                   previous_lifecycle_state, created_at, updated_at
+                   previous_lifecycle_state, created_at, updated_at,
+                   winnability_score, winnability_band
             FROM jobs
             {where_clause}
             ORDER BY {order_clause}
@@ -1307,6 +1352,121 @@ def bulk_update_job_status(request: BulkStatusUpdate) -> dict[str, Any]:
             "archived": archived,
             "skipped": skipped,
         }
+
+
+@app.post("/api/winnability/recompute")
+def recompute_winnability() -> dict[str, Any]:
+    """Backfill or refresh winnability for every non-trashed job (deterministic, no LLM)."""
+    with get_db() as conn:
+        ids = [int(r["id"]) for r in conn.execute(
+            "SELECT id FROM jobs WHERE lifecycle_state <> ?", (JOB_LIFECYCLE_TRASH,)).fetchall()]
+        bands: dict[str, int] = {}
+        for job_id in ids:
+            band = _refresh_winnability(conn, job_id).get("band", "")
+            bands[band] = bands.get(band, 0) + 1
+        return {"updated": len(ids), "bands": bands}
+
+
+def _funnel_group(rows: list[dict[str, Any]], key_fn, progressed_ids: set[int]) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, int]] = {}
+    for row in rows:
+        status = str(row.get("status") or "")
+        if status not in APPLIED_FAMILY_STATUSES:
+            continue
+        key = str(key_fn(row) or "unknown")
+        g = groups.setdefault(key, {"applied": 0, "progressed": 0, "rejected": 0, "ghosted": 0,
+                                    "no_response": 0, "awaiting": 0})
+        g["applied"] += 1
+        if status in PROGRESSED_STATUSES or int(row["id"]) in progressed_ids:
+            g["progressed"] += 1
+        if status == "rejected":
+            g["rejected"] += 1
+        elif status == "ghosted":
+            g["ghosted"] += 1
+        elif status == "no_response":
+            g["no_response"] += 1
+        elif status == "applied":
+            g["awaiting"] += 1
+    out = []
+    for key, g in sorted(groups.items(), key=lambda kv: -kv[1]["applied"]):
+        g["progressed_pct"] = round(100 * g["progressed"] / g["applied"], 1) if g["applied"] else 0.0
+        out.append({"key": key, **g})
+    return out
+
+
+def _employer_type(row: dict[str, Any]) -> str:
+    try:
+        return json.loads(row.get("winnability_json") or "{}").get("employer_type", "")
+    except (TypeError, ValueError):
+        return ""
+
+
+@app.get("/api/reports/funnel")
+def report_funnel(since: str = "") -> dict[str, Any]:
+    """Outcome funnel by source, employer type, winnability band, match band and month."""
+    with get_db() as conn:
+        rows = rows_to_dicts(conn.execute(
+            """
+            SELECT id, source, status, created_at, match_score, winnability_band, winnability_json
+            FROM jobs WHERE lifecycle_state <> ?
+            """,
+            (JOB_LIFECYCLE_TRASH,),
+        ).fetchall())
+        progressed_ids = {
+            int(r["job_id"]) for r in conn.execute(
+                "SELECT DISTINCT job_id FROM job_events WHERE event_type IN (?, ?)", PROGRESS_EMAIL_EVENTS
+            ).fetchall()
+        }
+    if since:
+        rows = [r for r in rows if str(r.get("created_at") or "") >= since]
+    totals = _funnel_group(rows, lambda r: "all", progressed_ids)
+    return {
+        "as_of": utc_now(),
+        "since": since or None,
+        "definition": "applied = any submitted status; progressed = follow-up, interview, ghosted (post-interview) "
+                      "or an interview/assessment email matched to the job.",
+        "totals": totals[0] if totals else {},
+        "by_source": _funnel_group(rows, lambda r: r.get("source"), progressed_ids),
+        "by_employer_type": _funnel_group(rows, _employer_type, progressed_ids),
+        "by_winnability_band": _funnel_group(rows, lambda r: r.get("winnability_band"), progressed_ids),
+        "by_match_band": _funnel_group(
+            rows, lambda r: f"{(int(r['match_score']) // 10) * 10}s" if r.get("match_score") is not None else "unscored",
+            progressed_ids),
+        "by_month": _funnel_group(rows, lambda r: str(r.get("created_at") or "")[:7], progressed_ids),
+    }
+
+
+@app.get("/api/reports/follow-up-due")
+def report_follow_up_due(applied_days: int = 7, interview_days: int = 10, no_response_days: int = 45) -> dict[str, Any]:
+    """Jobs whose next action is a follow-up, an interview status check, or aging to no_response."""
+    now = _utc_datetime()
+    with get_db() as conn:
+        rows = rows_to_dicts(conn.execute(
+            """
+            SELECT id, title, company, status, status_updated_at, updated_at, created_at, winnability_band
+            FROM jobs
+            WHERE lifecycle_state <> ? AND status IN ('applied', 'follow-up', 'interview')
+            """,
+            (JOB_LIFECYCLE_TRASH,),
+        ).fetchall())
+    items = []
+    for row in rows:
+        since = _parse_utc(row.get("status_updated_at") or row.get("updated_at") or row.get("created_at"))
+        days = (now - since).days if since else None
+        status = row["status"]
+        action = ""
+        if status == "interview" and days is not None and days >= interview_days:
+            action = f"Interview status check due ({days} days since last change)"
+        elif status == "follow-up":
+            action = "Follow-up marked due"
+        elif status == "applied" and days is not None and days >= no_response_days:
+            action = f"No response for {days} days: set no_response"
+        elif status == "applied" and days is not None and days >= applied_days:
+            action = f"Follow-up window open ({days} days since applying)"
+        if action:
+            items.append({**row, "days_since_status": days, "action": action})
+    items.sort(key=lambda r: (r["status"] != "interview", r["status"] != "follow-up", -(r["days_since_status"] or 0)))
+    return {"as_of": utc_now(), "count": len(items), "items": items}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -1465,6 +1625,14 @@ def analyze(job_id: int, generate_package: bool = True) -> dict[str, Any]:
         profile, profile_text, app_prompt = _llm_context(conn, job)
         result = analyze_job(job, profile_text, app_prompt)
         payload = result.model_dump()
+        winnability = _refresh_winnability(conn, job_id)
+        payload["winnability"] = winnability
+        payload["llm_recommendation"] = payload["recommendation"]
+        combined, reason = combine_recommendation(payload["recommendation"], winnability)
+        if reason:
+            payload["recommendation"] = combined
+            payload["risks"] = [reason, *payload.get("risks", [])]
+            log_event(conn, job_id, "winnability", reason)
         log_event(conn, job_id, "llm_trace", json.dumps(get_trace()))
         conn.execute(
             """

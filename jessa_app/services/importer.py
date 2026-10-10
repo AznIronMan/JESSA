@@ -711,7 +711,7 @@ def _is_job_type(line: str) -> bool:
 
 
 def _linkedin_top_card_fields(lines: list[str], page_title: str) -> dict[str, str]:
-    fields = {"company": "", "title": "", "location": "", "posted_date": "", "job_type": ""}
+    fields = {"company": "", "title": "", "location": "", "posted_date": "", "job_type": "", "applicants": "", "apply_method": ""}
     if len(lines) >= 2:
         fields["company"] = lines[0]
         fields["title"] = lines[1]
@@ -720,9 +720,17 @@ def _linkedin_top_card_fields(lines: list[str], page_title: str) -> dict[str, st
         if meta_parts:
             fields["location"] = meta_parts[0]
         for part in meta_parts[1:]:
-            if re.search(r"\b(ago|posted|reposted)\b", part, flags=re.I):
+            if not fields["posted_date"] and re.search(r"\b(ago|posted|reposted)\b", part, flags=re.I):
                 fields["posted_date"] = part
-                break
+            elif not fields["applicants"] and re.search(r"\bapplicants?\b", part, flags=re.I):
+                fields["applicants"] = part
+    for line in lines[2:15]:
+        if not fields["applicants"]:
+            found = re.search(r"((?:over |more than )?\d[\d,]*\+?\s+applicants)", line, flags=re.I)
+            if found:
+                fields["applicants"] = found.group(1)
+        if clean_text(line).lower() == "easy apply":
+            fields["apply_method"] = "Easy Apply"
     for line in lines[3:9]:
         if _is_work_mode(line) and line.lower() not in fields["location"].lower():
             fields["location"] = clean_text(" - ".join(part for part in (fields["location"], line) if part))
@@ -810,6 +818,8 @@ def _linkedin_job_description(imported: ImportedJob, lines: list[str], fields: d
         f"Location: {imported.location}" if imported.location else "",
         f"Posted: {imported.posted_date}" if imported.posted_date else "",
         f"Job type: {fields.get('job_type')}" if fields.get("job_type") else "",
+        f"Applicants: {fields.get('applicants')}" if fields.get("applicants") else "",
+        f"Apply method: {fields.get('apply_method')}" if fields.get("apply_method") else "",
     ]
     parts.extend(part for part in header if part)
     if about_job:
