@@ -794,12 +794,14 @@ def _insert_or_update_job(conn, imported: ImportedJob) -> int:
 
 def _refresh_winnability(conn, job_id: int) -> dict[str, Any]:
     row = conn.execute(
-        "SELECT id, source, title, company, location, posted_date, description FROM jobs WHERE id = ?",
+        "SELECT id, source, title, company, location, posted_date, description, created_at FROM jobs WHERE id = ?",
         (job_id,),
     ).fetchone()
     if not row:
         return {}
-    result = score_job(row_to_dict(row))
+    job = row_to_dict(row)
+    # Measure posting age as of import, so a backfill does not make every old job look stale.
+    result = score_job(job, _parse_utc(job.get("created_at")))
     conn.execute(
         "UPDATE jobs SET winnability_score = ?, winnability_band = ?, winnability_json = ? WHERE id = ?",
         (result["score"], result["band"], json.dumps(result), job_id),
